@@ -13,11 +13,13 @@ import math
 import re
 import threading
 import time
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from statistics import fmean
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from curl_cffi import requests as curl_requests
 
@@ -41,6 +43,51 @@ SOURCE_URLS = {
     "spx": "https://finance.yahoo.com/quote/%5EGSPC/",
     "vix": "https://finance.yahoo.com/quote/%5EVIX/",
 }
+
+POLICY_EVENT_QUERIES = {
+    "tariff": {
+        "name": "关税与贸易",
+        "query": "Trump tariffs trade exemption delay deal",
+        "poolCategories": ["半导体设备", "半导体材料", "先进封装", "PCB与材料"],
+    },
+    "technology": {
+        "name": "科技与出口管制",
+        "query": "Trump semiconductor AI export controls sanctions waiver",
+        "poolCategories": ["AI算力与服务器", "半导体与设备", "ASIC与网络芯片", "数据存储"],
+    },
+    "geopolitical": {
+        "name": "军事与地缘",
+        "query": "Trump military strike ceasefire talks sanctions",
+        "poolCategories": ["太空与国防", "国防军工", "能源", "能源与核电"],
+    },
+    "fiscal": {
+        "name": "财政、税收与产业补贴",
+        "query": "Trump tax spending budget manufacturing subsidy policy",
+        "poolCategories": ["数据中心基础设施", "电力设备", "能源与核电", "半导体设备"],
+    },
+}
+
+CROWDING_WATCHLIST = {
+    "MU": "Micron",
+    "NVDA": "NVIDIA",
+    "AMD": "AMD",
+    "AVGO": "Broadcom",
+    "MRVL": "Marvell",
+    "SMCI": "Super Micro",
+}
+
+HARDLINE_TERMS = (
+    "tariff", "sanction", "strike", "ban", "block", "crackdown", "threat", "impose",
+    "escalat", "restrict", "retaliat", "ultimatum",
+)
+SOFTENING_TERMS = (
+    "delay", "pause", "exemption", "waiver", "talks", "deal", "ease", "withdraw",
+    "suspend", "ceasefire", "settlement", "extend", "rollback",
+)
+EXECUTION_TERMS = (
+    "takes effect", "implemented", "signed", "enacted", "effective", "executive order",
+    "final rule", "approved",
+)
 
 INDUSTRY_MAPPING = [
     {
@@ -87,6 +134,195 @@ def finite_number(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def score_label(score: float) -> str:
+    if score >= 75:
+        return "极高"
+    if score >= 60:
+        return "偏高"
+    if score >= 40:
+        return "中性"
+    return "偏低"
+
+
+def escaped_raw_value(text: str, key: str) -> float | None:
+    marker = f'{key}\\":{{\\"raw\\":'
+    start = text.find(marker)
+    if start < 0:
+        return None
+    tail = text[start + len(marker):]
+    match = re.match(r"-?\d+(?:\.\d+)?", tail)
+    return finite_number(match.group(0)) if match else None
+
+
+def escaped_string_value(text: str, key: str) -> str | None:
+    marker = f'{key}\\":\\"'
+    start = text.find(marker)
+    if start < 0:
+        return None
+    tail = text[start + len(marker):]
+    end = tail.find('\\"')
+    return tail[:end] if end >= 0 else None
+
+
+def parse_recommendation_trend(text: str) -> list[dict[str, object]]:
+    start = text.find("recommendationTrend")
+    if start < 0:
+        return []
+    end = text.find("upgradeDowngradeHistory", start)
+    segment = text[start:end if end >= 0 else start + 10000].replace('\\"', '"')
+    pattern = re.compile(
+        r'\{"period":"([^"]+)","strongBuy":(\d+),"buy":(\d+),'
+        r'"hold":(\d+),"sell":(\d+),"strongSell":(\d+)\}'
+    )
+    rows = []
+    seen = set()
+    for match in pattern.finditer(segment):
+        period = match.group(1)
+        if period in seen:
+            continue
+        seen.add(period)
+        rows.append(
+            {
+                "period": period,
+                "strongBuy": int(match.group(2)),
+                "buy": int(match.group(3)),
+                "hold": int(match.group(4)),
+                "sell": int(match.group(5)),
+                "strongSell": int(match.group(6)),
+            }
+        )
+    return rows
+
+
+def parse_target_actions(text: str, days: int = 45) -> dict[str, int]:
+    start = text.rfind("upgradeDowngradeHistory")
+    if start < 0:
+        return {"raises": 0, "cuts": 0, "reiterates": 0}
+    segment = text[start:start + 180000].replace('\\"', '"')
+    cutoff = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    pattern = re.compile(
+        r'"epochGradeDate":(\d+).*?"action":"([^"]+)"'
+        r'(?:.*?"priceTargetAction":"([^"]+)")?',
+        flags=re.DOTALL,
+    )
+    raises = cuts = reiterates = 0
+    for match in pattern.finditer(segment):
+        if int(match.group(1)) < cutoff:
+            continue
+        target_action = (match.group(3) or "").lower()
+        if target_action == "raises":
+            raises += 1
+        elif target_action == "lowers":
+            cuts += 1
+        else:
+            reiterates += 1
+    return {"raises": raises, "cuts": cuts, "reiterates": reiterates}
+
+
+def parse_analyst_page(text: str) -> dict[str, object]:
+    target_mean = escaped_raw_value(text, "targetMeanPrice")
+    recommendation_mean = escaped_raw_value(text, "recommendationMean")
+    analyst_count = escaped_raw_value(text, "numberOfAnalystOpinions")
+    recommendation_key = escaped_string_value(text, "recommendationKey")
+    trends = parse_recommendation_trend(text)
+    if target_mean is None or not trends:
+        raise ValueError("analyst consensus fields unavailable")
+    return {
+        "targetMean": target_mean,
+        "recommendationMean": recommendation_mean,
+        "analystCount": int(analyst_count or 0),
+        "recommendationKey": recommendation_key or "unknown",
+        "trend": trends,
+        "targetActions": parse_target_actions(text),
+    }
+
+
+def period_bullish_share(row: dict[str, object] | None) -> float | None:
+    if not row:
+        return None
+    bullish = int(row.get("strongBuy", 0)) + int(row.get("buy", 0))
+    total = bullish + int(row.get("hold", 0)) + int(row.get("sell", 0)) + int(row.get("strongSell", 0))
+    return bullish / total if total else None
+
+
+def compute_crowding_score(
+    analyst: dict[str, object],
+    current_price: float,
+    return_5d: float,
+    return_20d: float,
+    drawdown_3m: float,
+) -> dict[str, object]:
+    trend_by_period = {str(item.get("period")): item for item in analyst.get("trend", [])}
+    bullish_share = period_bullish_share(trend_by_period.get("0m"))
+    prior_bullish_share = period_bullish_share(trend_by_period.get("-3m"))
+    target_mean = float(analyst.get("targetMean") or current_price)
+    target_upside = (target_mean / current_price - 1) * 100 if current_price else 0.0
+    actions = analyst.get("targetActions") or {}
+    raises = int(actions.get("raises", 0))
+    cuts = int(actions.get("cuts", 0))
+
+    consensus_score = clamp(((bullish_share or 0.5) - 0.55) / 0.35 * 100)
+    target_score = clamp((target_upside - 5) / 35 * 100)
+    action_total = raises + cuts
+    revision_score = clamp(50 + ((raises - cuts) / action_total * 50 if action_total else 0))
+    price_weakness = clamp(max(-return_5d * 7, -return_20d * 3.5, -drawdown_3m * 2.5, 0))
+    consensus_sticky = (
+        bullish_share is not None
+        and prior_bullish_share is not None
+        and bullish_share >= prior_bullish_share - 0.02
+    )
+    lag_score = price_weakness * (0.7 if consensus_sticky or raises >= cuts else 0.4)
+    score = clamp(
+        consensus_score * 0.30
+        + target_score * 0.20
+        + revision_score * 0.20
+        + lag_score * 0.30
+    )
+    evidence = []
+    if consensus_score >= 70:
+        evidence.append("买入评级高度一致")
+    if target_score >= 60:
+        evidence.append("目标价隐含空间偏乐观")
+    if revision_score >= 70 and raises >= 2:
+        evidence.append("近期目标价集中上调")
+    # A deep drawdown with sticky ratings is already a meaningful divergence even
+    # when the latest five sessions bounce. 45 roughly corresponds to a 25%+
+    # three-month drawdown after the stickiness discount.
+    if lag_score >= 45:
+        evidence.append("股价走弱但评级尚未松动")
+
+    if score >= 75 and len(evidence) >= 2 and lag_score >= 45:
+        zone = "distribution_risk"
+        label = "派发风险"
+    elif score >= 60:
+        zone = "crowded"
+        label = "一致预期拥挤"
+    elif score >= 40:
+        zone = "watch"
+        label = "观察背离"
+    else:
+        zone = "balanced"
+        label = "分歧仍在"
+    return {
+        "score": round(score, 1),
+        "zone": zone,
+        "label": label,
+        "evidence": evidence,
+        "metrics": {
+            "bullishShare": round((bullish_share or 0) * 100, 1),
+            "bullishShare3mAgo": round(prior_bullish_share * 100, 1) if prior_bullish_share is not None else None,
+            "targetMean": round(target_mean, 2),
+            "targetUpside": round(target_upside, 1),
+            "return5d": round(return_5d, 1),
+            "return20d": round(return_20d, 1),
+            "drawdown3m": round(drawdown_3m, 1),
+            "targetRaises45d": raises,
+            "targetCuts45d": cuts,
+            "analystCount": int(analyst.get("analystCount") or 0),
+        },
+    }
 
 
 def percentile_rank(values: list[float], current: float) -> float:
@@ -164,6 +400,95 @@ def fetch_market_series(driver_id: str, symbol: str) -> dict[str, object]:
         "updatedAt": updated_at,
         "points": points,
         "closes": [point[1] for point in points],
+    }
+
+
+def fetch_institutional_crowding(ticker: str, company: str) -> dict[str, object]:
+    analysis_url = f"https://finance.yahoo.com/quote/{quote(ticker)}/analysis/"
+    response = curl_requests.get(analysis_url, impersonate="chrome", timeout=18)
+    response.raise_for_status()
+    analyst = parse_analyst_page(response.text)
+    market = fetch_market_series(f"crowding_{ticker.lower()}", ticker)
+    closes = list(market["closes"])
+    current = float(market["current"])
+    return_5d = (current / closes[-6] - 1) * 100 if len(closes) >= 6 and closes[-6] else 0.0
+    return_20d = (current / closes[-21] - 1) * 100 if len(closes) >= 21 and closes[-21] else 0.0
+    recent_high = max(closes[-63:]) if closes else current
+    drawdown_3m = (current / recent_high - 1) * 100 if recent_high else 0.0
+    scored = compute_crowding_score(analyst, current, return_5d, return_20d, drawdown_3m)
+    return {
+        "ticker": ticker,
+        "company": company,
+        "currentPrice": round(current, 2),
+        "updatedAt": market.get("updatedAt"),
+        "sourceName": "Yahoo Finance Analysis + Market Data",
+        "sourceUrl": analysis_url,
+        **scored,
+    }
+
+
+def google_news_rss_url(query_text: str) -> str:
+    query_string = urlencode({"q": query_text, "hl": "en-US", "gl": "US", "ceid": "US:en"})
+    return f"https://news.google.com/rss/search?{query_string}"
+
+
+def classify_event_phase(text: str) -> str:
+    normalized = text.lower()
+    hardline = sum(term in normalized for term in HARDLINE_TERMS)
+    softening = sum(term in normalized for term in SOFTENING_TERMS)
+    execution = sum(term in normalized for term in EXECUTION_TERMS)
+    if execution > max(hardline, softening):
+        return "execution"
+    if softening > hardline:
+        return "softening"
+    if hardline:
+        return "escalation"
+    return "monitoring"
+
+
+def fetch_policy_event_feed(event_id: str) -> dict[str, object]:
+    config = POLICY_EVENT_QUERIES[event_id]
+    url = google_news_rss_url(str(config["query"]))
+    response = curl_requests.get(url, impersonate="chrome", timeout=16)
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+    items = []
+    phase_counts = {"escalation": 0, "softening": 0, "execution": 0, "monitoring": 0}
+    for item in root.findall("./channel/item")[:8]:
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        published = (item.findtext("pubDate") or "").strip()
+        source_node = item.find("source")
+        source_name = (source_node.text or "Google News") if source_node is not None else "Google News"
+        published_at = None
+        if published:
+            try:
+                published_at = parsedate_to_datetime(published).astimezone(timezone.utc).isoformat()
+            except (TypeError, ValueError):
+                published_at = published
+        phase = classify_event_phase(title)
+        phase_counts[phase] += 1
+        items.append(
+            {
+                "title": title,
+                "url": link,
+                "source": source_name,
+                "publishedAt": published_at,
+                "phase": phase,
+            }
+        )
+    directional = {key: phase_counts[key] for key in ("escalation", "softening", "execution")}
+    phase = max(directional, key=directional.get) if max(directional.values(), default=0) else "monitoring"
+    return {
+        "id": event_id,
+        "name": config["name"],
+        "phase": phase,
+        "phaseCounts": phase_counts,
+        "items": items[:4],
+        "poolCategories": config["poolCategories"],
+        "sourceName": "Google News RSS",
+        "sourceUrl": url,
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -348,6 +673,148 @@ def inflation_driver_payload(raw: dict[str, object]) -> dict[str, object]:
     }
 
 
+def build_pressure_breakdown(drivers: list[dict[str, object]]) -> list[dict[str, object]]:
+    scores = {str(item["id"]): float(item["pressureScore"]) for item in drivers}
+    groups = [
+        {
+            "id": "political",
+            "name": "政治承受力",
+            "score": scores.get("approval", 50.0),
+            "components": ["净支持率"],
+            "interpretation": "衡量民调是否压缩强硬政策的政治空间。",
+        },
+        {
+            "id": "rates",
+            "name": "利率与财政约束",
+            "score": scores.get("ust10y", 50.0),
+            "components": ["10年期美债"],
+            "interpretation": "衡量融资成本与财政扩张的市场约束。",
+        },
+        {
+            "id": "market",
+            "name": "市场与波动压力",
+            "score": fmean([scores.get("move", 50.0), scores.get("spx", 50.0), scores.get("vix", 50.0)]),
+            "components": ["MOVE", "标普500", "VIX"],
+            "interpretation": "衡量风险资产和波动率是否形成即时反馈。",
+        },
+        {
+            "id": "inflation",
+            "name": "通胀约束",
+            "score": scores.get("inflation", 50.0),
+            "components": ["CPI Nowcast"],
+            "interpretation": "衡量政策是否会进一步推高居民成本。",
+        },
+    ]
+    for group in groups:
+        group["score"] = round(float(group["score"]), 1)
+        group["level"] = score_label(float(group["score"]))
+    return groups
+
+
+def event_pressure_interaction(event: dict[str, object], index_value: float) -> str:
+    phase = event.get("phase")
+    if phase == "softening":
+        return "已出现软化措辞，需等待延期、豁免或正式协议确认。"
+    if phase == "execution":
+        return "政策进入执行阶段，市场压力不再等同于政策会立即撤回。"
+    if phase == "escalation" and index_value >= 60:
+        return "强硬升级与高压力并存，最容易出现高波动和后续政策修正。"
+    if phase == "escalation":
+        return "政策仍有推进空间，不能只因市场回撤就预判软化。"
+    return "目前以监测为主，等待明确政策文本或行动。"
+
+
+def decorate_policy_events(events: list[dict[str, object]], index_value: float) -> list[dict[str, object]]:
+    labels = {
+        "escalation": "强硬升级",
+        "softening": "软化/谈判",
+        "execution": "进入执行",
+        "monitoring": "持续监测",
+    }
+    output = []
+    for event in events:
+        output.append(
+            {
+                **event,
+                "phaseLabel": labels.get(str(event.get("phase")), "持续监测"),
+                "pressureInteraction": event_pressure_interaction(event, index_value),
+            }
+        )
+    return output
+
+
+def build_crowding_payload(rows: list[dict[str, object]], errors: dict[str, str]) -> dict[str, object]:
+    ranked = sorted(rows, key=lambda item: float(item.get("score", 0)), reverse=True)
+    aggregate = round(fmean(float(item.get("score", 0)) for item in ranked), 1) if ranked else None
+    high_risk_count = sum(float(item.get("score", 0)) >= 60 for item in ranked)
+    return {
+        "status": "live" if ranked and not errors else "partial" if ranked else "unavailable",
+        "asOf": datetime.now(timezone.utc).isoformat(),
+        "aggregateScore": aggregate,
+        "aggregateLabel": score_label(aggregate) if aggregate is not None else "数据不足",
+        "highRiskCount": high_risk_count,
+        "coverage": {"received": len(ranked), "requested": len(CROWDING_WATCHLIST)},
+        "rows": ranked,
+        "errors": errors,
+        "method": (
+            "买入评级一致性30% / 目标价乐观度20% / 近期目标价上调集中度20% / "
+            "价格走弱但评级未松动30%。至少两项证据同时成立，才标记派发风险。"
+        ),
+        "boundary": "机构拥挤度是反向风险提示，不是顶部确认，也不替代营收、利润、订单和现金流判断。",
+    }
+
+
+def build_scenario_matrix(index_value: float, crowding_score: float | None) -> dict[str, object]:
+    policy_high = index_value >= 60
+    crowding_high = crowding_score is not None and crowding_score >= 60
+    scenarios = [
+        {
+            "id": "policy_high_crowding_high",
+            "policy": "高政策压力",
+            "crowding": "高机构拥挤",
+            "title": "反弹不等于反转",
+            "action": "政策可能软化，但拥挤交易仍可能继续去杠杆；优先减追高、验订单与现金流。",
+        },
+        {
+            "id": "policy_high_crowding_low",
+            "policy": "高政策压力",
+            "crowding": "低机构拥挤",
+            "title": "等待政策确认",
+            "action": "关注延期、豁免、谈判等行动确认，避免只交易一句表态。",
+        },
+        {
+            "id": "policy_low_crowding_high",
+            "policy": "低政策压力",
+            "crowding": "高机构拥挤",
+            "title": "基本面与拥挤主导",
+            "action": "不能把下跌简单归因于宏观或去杠杆；重点检查预期透支和财报后资金撤离。",
+        },
+        {
+            "id": "policy_low_crowding_low",
+            "policy": "低政策压力",
+            "crowding": "低机构拥挤",
+            "title": "基本面验证窗口",
+            "action": "政策和仓位压力都有限，回到需求、资本开支、盈利质量与估值。",
+        },
+    ]
+    current_id = f"policy_{'high' if policy_high else 'low'}_crowding_{'high' if crowding_high else 'low'}"
+    current = next(item for item in scenarios if item["id"] == current_id)
+    return {"current": current, "scenarios": scenarios}
+
+
+def build_industry_mapping(index_value: float, crowding_score: float | None) -> list[dict[str, object]]:
+    output = [dict(item) for item in INDUSTRY_MAPPING]
+    crowding_high = crowding_score is not None and crowding_score >= 60
+    for item in output:
+        item["policyOverlay"] = "政策高压" if index_value >= 60 else "政策压力有限"
+        item["crowdingOverlay"] = "机构拥挤偏高" if crowding_high else "机构拥挤未到高位"
+        if crowding_high and item["sector"] in {"长久期成长", "AI基础设施"}:
+            item["stance"] = "防拥挤"
+            item["signal"] = "基本面强不等于价格安全"
+            item["text"] += " 当目标价与买入评级高度一致时，财报后价格反应和资金行为优先于口头目标价。"
+    return output
+
+
 def load_fallback() -> dict[str, object]:
     with FALLBACK_FILE.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -432,6 +899,10 @@ def build_policy_payload() -> dict[str, object]:
             driver_id: (lambda identifier=driver_id, ticker=symbol: fetch_market_series(identifier, ticker))
             for driver_id, (symbol, _, _) in MARKET_SOURCES.items()
         },
+        **{
+            f"event_{event_id}": (lambda identifier=event_id: fetch_policy_event_feed(identifier))
+            for event_id in POLICY_EVENT_QUERIES
+        },
     }
     results: dict[str, dict[str, object]] = {}
     errors: dict[str, str] = {}
@@ -458,6 +929,21 @@ def build_policy_payload() -> dict[str, object]:
         drivers.append(inflation_driver_payload(results["inflation"]))
     else:
         drivers.append(fallback_driver("inflation", fallback, errors.get("inflation", "source unavailable")))
+
+    crowding_rows: list[dict[str, object]] = []
+    crowding_errors: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=len(CROWDING_WATCHLIST)) as executor:
+        crowding_futures = {
+            executor.submit(fetch_institutional_crowding, ticker, company): ticker
+            for ticker, company in CROWDING_WATCHLIST.items()
+        }
+        for future in as_completed(crowding_futures):
+            ticker = crowding_futures[future]
+            try:
+                crowding_rows.append(future.result())
+            except Exception as error:
+                crowding_errors[ticker] = str(error)
+    crowding = build_crowding_payload(crowding_rows, crowding_errors)
 
     weighted_total = sum(float(item["pressureScore"]) * float(item["weight"]) for item in drivers)
     total_weight = sum(float(item["weight"]) for item in drivers) or 1.0
@@ -492,9 +978,22 @@ def build_policy_payload() -> dict[str, object]:
         for item in drivers
     ]
     fallback_count = sum(item["freshness"] == "fallback" for item in drivers)
+    event_rows = [
+        results[f"event_{event_id}"]
+        for event_id in POLICY_EVENT_QUERIES
+        if f"event_{event_id}" in results
+    ]
+    policy_events = decorate_policy_events(event_rows, index_value)
+    event_errors = {
+        event_id: errors[f"event_{event_id}"]
+        for event_id in POLICY_EVENT_QUERIES
+        if f"event_{event_id}" in errors
+    }
+    crowding_score = finite_number(crowding.get("aggregateScore"))
+    scenario_matrix = build_scenario_matrix(index_value, crowding_score)
     return {
         "asOf": datetime.now(timezone.utc).isoformat(),
-        "version": "0.2-live",
+        "version": "0.3-policy-intelligence",
         "status": "live" if fallback_count == 0 else "partial",
         "cacheSeconds": POLICY_CACHE_SECONDS,
         "summary": (
@@ -504,16 +1003,23 @@ def build_policy_payload() -> dict[str, object]:
         ),
         "index": {"value": index_value, "zone": zone, "change5d": change_5d},
         "drivers": drivers,
+        "pressureBreakdown": build_pressure_breakdown(drivers),
         "history": history,
-        "industryMapping": INDUSTRY_MAPPING,
+        "policyEvents": policy_events,
+        "policyEventErrors": event_errors,
+        "institutionalCrowding": crowding,
+        "scenarioMatrix": scenario_matrix,
+        "industryMapping": build_industry_mapping(index_value, crowding_score),
         "sourceHealth": source_health,
         "errors": errors,
         "method": {
             "weights": "民调25% / 标普20% / 美债15% / MOVE15% / VIX15% / CPI Nowcast10%",
             "marketRefresh": "5分钟缓存，跟随最近交易时点",
             "slowRefresh": "民调和通胀跟随源站发布频率",
+            "eventModel": "事件新闻只判断升级、执行、软化阶段，不直接进入压力总分",
+            "crowdingModel": crowding["method"],
         },
-        "disclaimer": "政策压力情景监测，不预测个体决策，不构成投资建议。",
+        "disclaimer": "政策压力与机构拥挤度是两套独立信号；二者都不预测个体决策，也不构成投资建议。",
     }
 
 

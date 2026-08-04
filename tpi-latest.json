@@ -1,6 +1,6 @@
 {
   "asOf": "2026-07-24T08:00:00-04:00",
-  "version": "0.1-demo",
+  "version": "0.3-fallback-snapshot",
   "status": "demo_snapshot",
   "summary": "利率、波动率与股市回撤同步抬升，指数进入高压区；后续重点验证是否出现政策执行延期、豁免或谈判措辞软化。",
   "index": {
@@ -8,6 +8,12 @@
     "zone": "high_pressure",
     "change5d": 6.8
   },
+  "pressureBreakdown": [
+    { "id": "political", "name": "政治承受力", "score": 77, "level": "极高", "components": ["净支持率"], "interpretation": "衡量民调是否压缩强硬政策的政治空间。" },
+    { "id": "rates", "name": "利率与财政约束", "score": 71, "level": "偏高", "components": ["10年期美债"], "interpretation": "衡量融资成本与财政扩张的市场约束。" },
+    { "id": "market", "name": "市场与波动压力", "score": 68.3, "level": "偏高", "components": ["MOVE", "标普500", "VIX"], "interpretation": "衡量风险资产和波动率是否形成即时反馈。" },
+    { "id": "inflation", "name": "通胀约束", "score": 56, "level": "中性", "components": ["CPI Nowcast"], "interpretation": "衡量政策是否会进一步推高居民成本。" }
+  ],
   "drivers": [
     {
       "id": "approval",
@@ -74,6 +80,31 @@
     { "date": "2026-07-18", "label": "07.18", "value": 63 },
     { "date": "2026-07-24", "label": "07.24", "value": 68.4 }
   ],
+  "policyEvents": [],
+  "policyEventErrors": {
+    "snapshot": "实时政策事件需要在线接口"
+  },
+  "institutionalCrowding": {
+    "status": "unavailable",
+    "asOf": "2026-07-24T08:00:00-04:00",
+    "aggregateScore": null,
+    "aggregateLabel": "数据不足",
+    "highRiskCount": 0,
+    "coverage": { "received": 0, "requested": 6 },
+    "rows": [],
+    "errors": { "snapshot": "实时分析师数据需要在线接口" },
+    "method": "买入评级一致性30% / 目标价乐观度20% / 近期目标价上调集中度20% / 价格走弱但评级未松动30%。",
+    "boundary": "机构拥挤度是反向风险提示，不是顶部确认，也不替代基本面判断。"
+  },
+  "scenarioMatrix": {
+    "current": { "id": "policy_high_crowding_low", "policy": "高政策压力", "crowding": "低机构拥挤", "title": "等待政策确认", "action": "当前为回退快照，等待实时拥挤数据恢复后再判断。" },
+    "scenarios": [
+      { "id": "policy_high_crowding_high", "policy": "高政策压力", "crowding": "高机构拥挤", "title": "反弹不等于反转", "action": "政策可能软化，但拥挤交易仍可能继续去杠杆。" },
+      { "id": "policy_high_crowding_low", "policy": "高政策压力", "crowding": "低机构拥挤", "title": "等待政策确认", "action": "关注延期、豁免、谈判等行动确认。" },
+      { "id": "policy_low_crowding_high", "policy": "低政策压力", "crowding": "高机构拥挤", "title": "基本面与拥挤主导", "action": "不能把下跌简单归因于宏观或去杠杆。" },
+      { "id": "policy_low_crowding_low", "policy": "低政策压力", "crowding": "低机构拥挤", "title": "基本面验证窗口", "action": "回到需求、资本开支、盈利质量与估值。" }
+    ]
+  },
   "industryMapping": [
     {
       "sector": "本土制造与关税链",
@@ -100,5 +131,10 @@
       "poolCategories": ["数据中心基础设施", "AI算力与服务器", "数据存储", "光子学与光通信", "光通信"]
     }
   ],
-  "disclaimer": "Demo snapshot only. Not investment advice."
+  "method": {
+    "weights": "民调25% / 标普20% / 美债15% / MOVE15% / VIX15% / CPI Nowcast10%",
+    "eventModel": "事件新闻只判断升级、执行、软化阶段，不直接进入压力总分",
+    "crowdingModel": "机构一致性、目标价乐观度、调价集中度与价格背离的组合风险信号"
+  },
+  "disclaimer": "Fallback snapshot only. Policy pressure and institutional crowding are separate research signals, not investment advice."
 }

@@ -38,7 +38,7 @@ This project puts those questions into one inspectable data and UI model. It nev
 | Feature matrix | Compare names by chain position, theme, market, and status | `stock-pool.csv` |
 | Stock list | Search, filters, quotes, and research positioning | Stock pool + `/api/quotes` |
 | Active discovery | Joint scoring across official signals, news, arXiv, the current pool, and market position | Four discovery CSVs + reports |
-| Policy pressure | Six pressure drivers, recent trend, and industry transmission | `/api/policy` + `tpi-latest.json` |
+| Policy and crowding | Six pressure drivers, event stages, institutional-consensus contrarian risk, scenarios, and industry transmission | `/api/policy` + `tpi-latest.json` |
 
 Active discovery covers:
 
@@ -49,6 +49,10 @@ Active discovery covers:
 - price changes and market position.
 
 The policy-pressure index uses six weighted drivers: net approval 25%, S&P 500 20%, US 10-year yield 15%, MOVE 15%, VIX 15%, and CPI Nowcast 10%. A high score indicates stronger market and political constraints; it does not mean a policy will necessarily be withdrawn.
+
+Institutional crowding is kept separate from policy pressure. It combines bullish-rating consensus, target-price optimism, concentrated target raises, and a price-versus-rating divergence where price weakens before analysts revise. A high target price alone is never treated as a top; the stronger distribution-risk label requires multiple confirming signals and real price divergence.
+
+The policy-event radar covers tariffs and trade, technology and export controls, military and geopolitical actions, and fiscal or industrial-subsidy policy. It classifies escalation, execution, softening or negotiation, and monitoring. News stages do not enter the pressure score directly; formal policy text and effective dates take priority.
 
 ## Architecture
 
@@ -90,7 +94,7 @@ Vercel clones the repository and deploys the static site together with `api/*.py
 
 - `/api/health`: pool size and market distribution;
 - `/api/quotes`: Yahoo Finance quote aggregation with a 60-second application cache;
-- `/api/policy`: six policy-pressure drivers with a 300-second application cache.
+- `/api/policy`: policy pressure, event stages, and institutional crowding with a 300-second application cache.
 
 No secret or API key is required. After deployment, pushes to the cloned repository trigger future deployments.
 
@@ -193,7 +197,9 @@ Returns quotes, missing symbols, market counts, and the data timestamp. Add `?re
 
 ### `GET /api/policy`
 
-Returns the policy-pressure score, six drivers, recent history, industry mappings, source freshness, and an error ledger. Add `?refresh=1` to request a refetch.
+Returns the policy-pressure score, four-part decomposition, six drivers, event stages, institutional crowding, the two-dimensional scenario matrix, industry mappings, source freshness, and error ledgers. Add `?refresh=1` to request a refetch.
+
+The default crowding watchlist is `MU`, `NVDA`, `AMD`, `AVGO`, `MRVL`, and `SMCI`. This is contrarian risk monitoring, not top confirmation; earnings, orders, profits, and cash flow still require independent validation.
 
 > Market and macro sources can be delayed, rate-limited, or temporarily unavailable. APIs report gaps or explicitly labeled fallback data.
 
@@ -219,7 +225,7 @@ app.js                   UI state, data loading, and interactions
 index.html               Page structure
 styles.css               Visual system
 discovery_engine.py      Active-discovery engine
-policy_engine.py         Policy-pressure calculation
+policy_engine.py         Policy pressure, event-stage, and crowding calculation
 server.py                Local server and quote API
 sync_pool.py             US / A-share source merge
 vercel.json              Vercel configuration

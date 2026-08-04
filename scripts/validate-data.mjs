@@ -18,3 +18,18 @@ for (const [file, minimum] of Object.entries(minimumRows)) {
 
 const paperText = await readFile(resolve(root, "arxiv-papers.csv"), "utf8");
 console.log(`arxiv-papers.csv: ${Math.max(0, paperText.trim().split(/\r?\n/).length - 1)} data rows`);
+
+const policySnapshot = JSON.parse(await readFile(resolve(root, "tpi-latest.json"), "utf8"));
+if (!Array.isArray(policySnapshot.pressureBreakdown) || policySnapshot.pressureBreakdown.length !== 4) {
+  throw new Error("tpi-latest.json must contain four pressure decomposition groups");
+}
+if (!Array.isArray(policySnapshot.policyEvents)) {
+  throw new Error("tpi-latest.json policyEvents must be an array");
+}
+if (!policySnapshot.institutionalCrowding || !Array.isArray(policySnapshot.institutionalCrowding.rows)) {
+  throw new Error("tpi-latest.json must contain an institutional crowding fallback");
+}
+if (!policySnapshot.scenarioMatrix?.current || policySnapshot.scenarioMatrix?.scenarios?.length !== 4) {
+  throw new Error("tpi-latest.json must contain the four policy and crowding scenarios");
+}
+console.log(`tpi-latest.json: ${policySnapshot.version} policy intelligence fallback`);

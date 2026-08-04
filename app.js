@@ -1448,6 +1448,12 @@ function renderPolicy() {
   const drivers = Array.isArray(payload.drivers) ? payload.drivers : [];
   const mappings = Array.isArray(payload.industryMapping) ? payload.industryMapping : [];
   const history = Array.isArray(payload.history) ? payload.history : [];
+  const pressureBreakdown = Array.isArray(payload.pressureBreakdown) ? payload.pressureBreakdown : [];
+  const policyEvents = Array.isArray(payload.policyEvents) ? payload.policyEvents : [];
+  const crowding = payload.institutionalCrowding || {};
+  const crowdingRows = Array.isArray(crowding.rows) ? crowding.rows : [];
+  const scenarioMatrix = payload.scenarioMatrix || {};
+  const scenarios = Array.isArray(scenarioMatrix.scenarios) ? scenarioMatrix.scenarios : [];
   const sourceHealth = Array.isArray(payload.sourceHealth) ? payload.sourceHealth : [];
   const statusMeta = policyStatusMeta(payload.status);
   const asOfText = formatPolicyTime(payload.asOf);
@@ -1502,6 +1508,93 @@ function renderPolicy() {
       <article><span>下一步验证</span><strong>看行动，不只看表态</strong><p>延期、豁免、撤回或正式谈判进展才算政策软化确认。</p></article>
     </section>
 
+    ${pressureBreakdown.length ? `<section class="policy-section">
+      <div class="policy-section-head">
+        <div><span>PRESSURE DECOMPOSITION</span><h3>压力从哪里来</h3></div>
+        <p>把综合指数拆回政治、利率、市场和通胀四类约束，避免总分掩盖结构差异。</p>
+      </div>
+      <div class="policy-breakdown-grid">
+        ${pressureBreakdown.map((group) => `<article>
+          <div><span>${escapeHtml(group.name || group.id)}</span><strong>${Number(group.score || 0).toFixed(1)}</strong></div>
+          <div class="policy-breakdown-bar"><i style="width:${clampValue(Number(group.score || 0), 0, 100)}%"></i></div>
+          <small>${escapeHtml(group.level || "")} · ${escapeHtml((group.components || []).join(" / "))}</small>
+          <p>${escapeHtml(group.interpretation || "")}</p>
+        </article>`).join("")}
+      </div>
+    </section>` : ""}
+
+    ${policyEvents.length ? `<section class="policy-section">
+      <div class="policy-section-head">
+        <div><span>POLICY EVENT RADAR</span><h3>政策事件：表态、执行还是软化</h3></div>
+        <p>新闻只负责定位阶段，不直接改变压力指数。正式文本、豁免清单和执行日期优先级更高。</p>
+      </div>
+      <div class="policy-event-grid">
+        ${policyEvents.map((event) => {
+          const mappedStocks = policyMappedStocks(event.poolCategories || []);
+          return `<article class="policy-event-card ${escapeHtml(event.phase || "monitoring")}">
+            <div class="policy-event-head"><h4>${escapeHtml(event.name || "政策事件")}</h4><span>${escapeHtml(event.phaseLabel || "持续监测")}</span></div>
+            <p>${escapeHtml(event.pressureInteraction || "")}</p>
+            <div class="policy-event-news">
+              ${(event.items || []).slice(0, 3).map((item) => {
+                const href = safeExternalHref(item.url || "");
+                return href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer"><strong>${escapeHtml(item.title || "")}</strong><span>${escapeHtml(item.source || "")} · ${escapeHtml(formatPolicyTime(item.publishedAt))}</span></a>` : "";
+              }).join("") || "<span>暂无可用事件条目</span>"}
+            </div>
+            <div class="policy-ticker-list">
+              ${mappedStocks.slice(0, 6).map((stock) => `<button type="button" data-policy-ticker="${escapeHtml(stock.ticker)}">${escapeHtml(displayTicker(stock.ticker))}</button>`).join("") || "<span>暂无直接映射</span>"}
+            </div>
+          </article>`;
+        }).join("")}
+      </div>
+    </section>` : ""}
+
+    <section class="policy-section policy-crowding-section">
+      <div class="policy-section-head">
+        <div><span>INSTITUTIONAL CROWDING / CONTRARIAN RISK</span><h3>机构一致性反向信号</h3></div>
+        <p>评级越一致、目标价越乐观，却同时出现价格走弱和下调滞后，派发风险越高；高目标价单独不构成顶部。</p>
+      </div>
+      <div class="policy-crowding-summary">
+        <div><span>覆盖</span><strong>${Number(crowding.coverage?.received || 0)} / ${Number(crowding.coverage?.requested || 0)}</strong></div>
+        <div><span>综合拥挤度</span><strong>${Number.isFinite(Number(crowding.aggregateScore)) ? Number(crowding.aggregateScore).toFixed(1) : "—"}</strong></div>
+        <div><span>高风险标的</span><strong>${Number(crowding.highRiskCount || 0)}</strong></div>
+        <p>${escapeHtml(crowding.boundary || "机构拥挤度是反向风险提示，不是顶部确认。")}</p>
+      </div>
+      ${crowdingRows.length ? `<div class="policy-crowding-grid">
+        ${crowdingRows.map((row) => {
+          const metrics = row.metrics || {};
+          const ticker = String(row.ticker || "");
+          const tickerLabel = stockByTicker.has(ticker)
+            ? `<button type="button" data-policy-ticker="${escapeHtml(ticker)}">${escapeHtml(ticker)}</button>`
+            : `<strong>${escapeHtml(ticker)}</strong>`;
+          return `<article class="policy-crowding-card ${escapeHtml(row.zone || "balanced")}">
+            <div class="policy-crowding-head"><div>${tickerLabel}<span>${escapeHtml(row.company || "")}</span></div><b>${Number(row.score || 0).toFixed(0)} · ${escapeHtml(row.label || "观察")}</b></div>
+            <div class="policy-crowding-metrics">
+              <span>买入占比 <strong>${Number(metrics.bullishShare || 0).toFixed(0)}%</strong></span>
+              <span>目标空间 <strong>${Number(metrics.targetUpside || 0) >= 0 ? "+" : ""}${Number(metrics.targetUpside || 0).toFixed(1)}%</strong></span>
+              <span>5日价格 <strong>${Number(metrics.return5d || 0) >= 0 ? "+" : ""}${Number(metrics.return5d || 0).toFixed(1)}%</strong></span>
+              <span>45日调价 <strong>${Number(metrics.targetRaises45d || 0)}升 / ${Number(metrics.targetCuts45d || 0)}降</strong></span>
+            </div>
+            <div class="policy-crowding-evidence">
+              ${(row.evidence || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("") || "<span>尚未形成多证据共振</span>"}
+            </div>
+            <footer><span>${escapeHtml(row.sourceName || "")}</span><time>${escapeHtml(formatPolicyTime(row.updatedAt))}</time></footer>
+          </article>`;
+        }).join("")}
+      </div>` : `<div class="policy-crowding-empty">分析师覆盖暂时不可用，本模块不使用虚构数据填补。</div>`}
+      <div class="policy-crowding-method">${escapeHtml(crowding.method || payload.method?.crowdingModel || "至少两项证据同时成立才提示高风险。")}</div>
+    </section>
+
+    ${scenarioMatrix.current ? `<section class="policy-section">
+      <div class="policy-section-head">
+        <div><span>DECISION MATRIX</span><h3>政策压力 × 机构拥挤</h3></div>
+        <p>把“政策会不会软化”和“资产是否已经被过度推销”分开判断。</p>
+      </div>
+      <div class="policy-current-scenario"><span>当前情景</span><strong>${escapeHtml(scenarioMatrix.current.title || "")}</strong><p>${escapeHtml(scenarioMatrix.current.action || "")}</p></div>
+      <div class="policy-scenario-grid">
+        ${scenarios.map((scenario) => `<article class="${scenario.id === scenarioMatrix.current.id ? "active" : ""}"><span>${escapeHtml(scenario.policy || "")} × ${escapeHtml(scenario.crowding || "")}</span><strong>${escapeHtml(scenario.title || "")}</strong><p>${escapeHtml(scenario.action || "")}</p></article>`).join("")}
+      </div>
+    </section>` : ""}
+
     <section class="policy-section">
       <div class="policy-section-head">
         <div><span>SIX PRESSURE DRIVERS</span><h3>六项压力驱动</h3></div>
@@ -1554,6 +1647,7 @@ function renderPolicy() {
           return `<article class="policy-mapping-card">
             <div class="policy-mapping-title"><h4>${escapeHtml(mapping.sector || "行业映射")}</h4><span class="${policyStanceClass(mapping.stance)}">${escapeHtml(mapping.stance || "观察")}</span></div>
             ${mapping.signal ? `<div class="policy-mapping-signal">${escapeHtml(mapping.signal)}</div>` : ""}
+            ${(mapping.policyOverlay || mapping.crowdingOverlay) ? `<div class="policy-mapping-overlays"><span>${escapeHtml(mapping.policyOverlay || "")}</span><span>${escapeHtml(mapping.crowdingOverlay || "")}</span></div>` : ""}
             <p>${escapeHtml(mapping.text || "")}</p>
             <div class="policy-mapping-count"><strong>${mappedStocks.length}</strong><span>只关联股票池标的</span></div>
             <div class="policy-ticker-list">
