@@ -38,7 +38,7 @@
 | 特征矩阵 | 按产业位置、主题、市场和状态对比标的 | `stock-pool.csv` |
 | 股票列表 | 搜索、筛选、行情与研究定位 | 股票池 + `/api/quotes` |
 | 主动发现 | 官方信号、新闻、arXiv、股票池与行情位置联合评分 | 4 份 discovery CSV + 日报 |
-| 政策与拥挤 | 六项政策压力、事件阶段、机构一致性反向信号、情景矩阵和行业传导 | `/api/policy` + `tpi-latest.json` |
+| 政策与拥挤 | 六项政策压力、EPS/收入预期修正、财报归因、机构补降时间线和行业传导 | `/api/policy` + 每日时点快照 |
 
 主动发现默认覆盖：
 
@@ -51,6 +51,8 @@
 政策压力指数采用六项指标：净支持率 25%、标普 500 20%、10 年期美债 15%、MOVE 15%、VIX 15%、CPI Nowcast 10%。高分表示市场与政治约束更强，不代表某项政策必然撤回。
 
 机构拥挤度与政策压力是两套独立信号。拥挤度综合买入评级一致性、目标价乐观度、近期目标价上调集中度，以及“价格已经走弱但评级仍未松动”的背离。单一高目标价不会被判定为顶部；只有多项证据共振且价格出现背离，才会标记“派发风险”。
+
+机构反向模块进一步记录下一季度 EPS 一致预期相对30日和60日前的变化；收入一致预期由每日时点快照计算，历史不足时明确显示“积累中”。最近财报后的1日、5日和20日收益会与 SOXX 对比，并结合反应日成交量区分行业因素和公司特异性走弱。目标价调整事件、15%回撤触发点和每日风险快照共同组成“股价先跌、机构后降”时间线。
 
 政策事件雷达覆盖关税与贸易、科技与出口管制、军事与地缘、财政与产业补贴四类事件，并区分强硬升级、进入执行、软化/谈判和持续监测。新闻阶段不直接进入政策压力总分，正式政策文本和执行日期优先。
 
@@ -197,9 +199,11 @@ python3 sync_pool.py \
 
 ### `GET /api/policy`
 
-返回政策压力总分、四类压力分解、六项驱动、政策事件阶段、机构拥挤度、二维情景矩阵、行业映射、来源新鲜度和错误账本。添加 `?refresh=1` 可请求重新抓取。
+返回政策压力总分、四类压力分解、六项驱动、政策事件阶段、机构拥挤度、EPS/收入预期修正、财报事件窗口、SOXX行业调整后收益、目标价下调滞后、每日历史、二维情景矩阵、行业映射、来源新鲜度和错误账本。添加 `?refresh=1` 可请求重新抓取。
 
 机构拥挤度默认观察 `MU`、`NVDA`、`AMD`、`AVGO`、`MRVL` 和 `SMCI`。它是反向风险提示，不是顶部确认；财报、订单、盈利和现金流仍需独立验证。
+
+线上站点的每日自动任务会在刷新主动发现后运行 `crowding_snapshot.py`。只有6只标的全部抓取成功时才会写入快照，避免一次网络故障污染历史序列。自托管用户可把 `examples/crowding-snapshot.yml` 复制到 `.github/workflows/` 启用 GitHub Actions；首次部署后，收入30日和60日修正会分别在积累足够时点后变为可用。
 
 > 上游行情和宏观数据可能延迟、限流或暂时不可用。API 会报告缺口或使用明确标注的回退数据。
 
@@ -213,6 +217,7 @@ python3 sync_pool.py \
 | `discovery-candidates.csv` | 候选评分与处理状态 | 是 |
 | `discovery-history.csv` | 每日发现趋势 | 人工验收后维护 |
 | `tpi-latest.json` | 政策压力降级快照 | 按有效快照维护 |
+| `institutional-crowding-history.json` | 机构风险、目标价、EPS与收入每日时点快照 | `crowding_snapshot.py` |
 
 ## 目录结构
 
@@ -225,7 +230,8 @@ app.js                   页面状态、数据加载和交互
 index.html               页面结构
 styles.css               视觉系统
 discovery_engine.py      主动发现引擎
-policy_engine.py         政策压力、事件阶段与机构拥挤度计算
+policy_engine.py         政策压力、预期修正、财报归因与机构补降计算
+crowding_snapshot.py     保存机构一致性每日时点快照
 server.py                本地服务器与行情 API
 sync_pool.py             美股 / A 股源表合并
 vercel.json              Vercel 配置
@@ -239,7 +245,7 @@ npm run check
 node --check app.js
 PYTHONPYCACHEPREFIX=/tmp/ai-stock-pool-pycache \
   python3 -m py_compile \
-  sync_pool.py discovery_engine.py policy_engine.py server.py \
+  sync_pool.py discovery_engine.py policy_engine.py crowding_snapshot.py server.py \
   api/health.py api/quotes.py api/policy.py
 ```
 

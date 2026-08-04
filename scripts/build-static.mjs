@@ -13,6 +13,7 @@ const files = [
   "arxiv-papers.csv",
   "discovery-history.csv",
   "tpi-latest.json",
+  "institutional-crowding-history.json",
 ];
 
 await rm(output, { recursive: true, force: true });

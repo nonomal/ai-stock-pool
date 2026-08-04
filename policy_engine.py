@@ -26,7 +26,9 @@ from curl_cffi import requests as curl_requests
 
 BASE_DIR = Path(__file__).resolve().parent
 FALLBACK_FILE = BASE_DIR / "tpi-latest.json"
+CROWDING_HISTORY_FILE = BASE_DIR / "institutional-crowding-history.json"
 POLICY_CACHE_SECONDS = 300
+CROWDING_BENCHMARK = "SOXX"
 
 MARKET_SOURCES = {
     "ust10y": ("^TNX", "10年期美债", 0.15),
@@ -166,6 +168,141 @@ def escaped_string_value(text: str, key: str) -> str | None:
     return tail[:end] if end >= 0 else None
 
 
+def escaped_json_value(text: str, key: str) -> object | None:
+    """Decode a Yahoo embedded JSON value without depending on CSS or table HTML."""
+    markers = ((f'{key}\\":', True), (f'"{key}":', False))
+    decoder = json.JSONDecoder()
+    for marker, escaped in markers:
+        start = text.find(marker)
+        if start < 0:
+            continue
+        fragment = text[start + len(marker):]
+        if escaped:
+            fragment = fragment.replace('\\"', '"')
+        try:
+            value, _ = decoder.raw_decode(fragment)
+            return value
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def raw_number(value: object) -> float | None:
+    if isinstance(value, dict):
+        return finite_number(value.get("raw"))
+    return finite_number(value)
+
+
+def percent_change(current: float | None, prior: float | None) -> float | None:
+    if current is None or prior in (None, 0):
+        return None
+    return round((current / prior - 1) * 100, 1)
+
+
+def parse_expectation_trend(text: str) -> dict[str, object]:
+    payload = escaped_json_value(text, "earningsTrend")
+    rows = payload.get("trend", []) if isinstance(payload, dict) else []
+    periods = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("period") not in {"0q", "+1q", "0y", "+1y"}:
+            continue
+        eps_trend = row.get("epsTrend") if isinstance(row.get("epsTrend"), dict) else {}
+        revenue = row.get("revenueEstimate") if isinstance(row.get("revenueEstimate"), dict) else {}
+        current_eps = raw_number(eps_trend.get("current"))
+        eps_30d = raw_number(eps_trend.get("30daysAgo"))
+        eps_60d = raw_number(eps_trend.get("60daysAgo"))
+        periods.append(
+            {
+                "period": row.get("period"),
+                "endDate": row.get("endDate"),
+                "eps": {
+                    "current": current_eps,
+                    "value30dAgo": eps_30d,
+                    "value60dAgo": eps_60d,
+                    "change30d": percent_change(current_eps, eps_30d),
+                    "change60d": percent_change(current_eps, eps_60d),
+                },
+                "revenue": {
+                    "current": raw_number(revenue.get("avg")),
+                    "value30dAgo": None,
+                    "value60dAgo": None,
+                    "change30d": None,
+                    "change60d": None,
+                    "historyStatus": "collecting",
+                },
+            }
+        )
+    primary = next((row for row in periods if row["period"] == "0q"), periods[0] if periods else None)
+    return {
+        "primaryPeriod": primary.get("period") if primary else None,
+        "primary": primary,
+        "periods": periods,
+        "method": "EPS修正来自Yahoo当前、30日前和60日前一致预期；收入修正由每日时点快照计算。",
+    }
+
+
+def parse_calendar_events(text: str) -> dict[str, object]:
+    payload = escaped_json_value(text, "calendarEvents")
+    earnings = payload.get("earnings", {}) if isinstance(payload, dict) else {}
+
+    def first_date(key: str) -> str | None:
+        values = earnings.get(key) if isinstance(earnings, dict) else None
+        if not isinstance(values, list) or not values:
+            return None
+        raw = raw_number(values[0])
+        return iso_from_timestamp(raw) if raw is not None else values[0].get("fmt")
+
+    call_date = first_date("earningsCallDate")
+    call_is_future = False
+    if call_date:
+        try:
+            call_is_future = datetime.fromisoformat(call_date.replace("Z", "+00:00")) > datetime.now(timezone.utc)
+        except ValueError:
+            call_is_future = False
+    return {
+        "lastCallDate": None if call_is_future else call_date,
+        "nextCallDate": call_date if call_is_future else None,
+        "nextReportDate": first_date("earningsDate"),
+        "nextDateEstimated": bool(earnings.get("isEarningsDateEstimate")) if isinstance(earnings, dict) else None,
+    }
+
+
+def parse_target_events(text: str, days: int = 365) -> list[dict[str, object]]:
+    payload = escaped_json_value(text, "upgradeDowngradeHistory")
+    history = payload.get("history", []) if isinstance(payload, dict) else []
+    cutoff = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    events = []
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        epoch = int(raw_number(row.get("epochGradeDate")) or 0)
+        if epoch < cutoff:
+            continue
+        target_action = str(row.get("priceTargetAction") or "").lower()
+        if target_action == "raises":
+            event_type, label = "target_raise", "上调目标价"
+        elif target_action == "lowers":
+            event_type, label = "target_cut", "下调目标价"
+        else:
+            action = str(row.get("action") or "").lower()
+            event_type = "rating_change" if action in {"up", "down", "init"} else "reiterate"
+            label = "评级调整" if event_type == "rating_change" else "维持评级"
+        events.append(
+            {
+                "date": iso_from_timestamp(epoch),
+                "epoch": epoch,
+                "firm": row.get("firm") or "",
+                "type": event_type,
+                "label": label,
+                "toGrade": row.get("toGrade") or "",
+                "fromGrade": row.get("fromGrade") or "",
+                "currentTarget": raw_number(row.get("currentPriceTarget")),
+                "priorTarget": raw_number(row.get("priorPriceTarget")),
+            }
+        )
+    return sorted(events, key=lambda item: int(item["epoch"]))
+
+
 def parse_recommendation_trend(text: str) -> list[dict[str, object]]:
     start = text.find("recommendationTrend")
     if start < 0:
@@ -197,6 +334,13 @@ def parse_recommendation_trend(text: str) -> list[dict[str, object]]:
 
 
 def parse_target_actions(text: str, days: int = 45) -> dict[str, int]:
+    structured_events = parse_target_events(text, days=days)
+    if structured_events:
+        return {
+            "raises": sum(item["type"] == "target_raise" for item in structured_events),
+            "cuts": sum(item["type"] == "target_cut" for item in structured_events),
+            "reiterates": sum(item["type"] in {"reiterate", "rating_change"} for item in structured_events),
+        }
     start = text.rfind("upgradeDowngradeHistory")
     if start < 0:
         return {"raises": 0, "cuts": 0, "reiterates": 0}
@@ -229,13 +373,20 @@ def parse_analyst_page(text: str) -> dict[str, object]:
     trends = parse_recommendation_trend(text)
     if target_mean is None or not trends:
         raise ValueError("analyst consensus fields unavailable")
+    target_events = parse_target_events(text)
     return {
         "targetMean": target_mean,
+        "targetMedian": escaped_raw_value(text, "targetMedianPrice"),
+        "targetLow": escaped_raw_value(text, "targetLowPrice"),
+        "targetHigh": escaped_raw_value(text, "targetHighPrice"),
         "recommendationMean": recommendation_mean,
         "analystCount": int(analyst_count or 0),
         "recommendationKey": recommendation_key or "unknown",
         "trend": trends,
         "targetActions": parse_target_actions(text),
+        "targetEvents": target_events,
+        "expectations": parse_expectation_trend(text),
+        "earningsCalendar": parse_calendar_events(text),
     }
 
 
@@ -262,6 +413,12 @@ def compute_crowding_score(
     actions = analyst.get("targetActions") or {}
     raises = int(actions.get("raises", 0))
     cuts = int(actions.get("cuts", 0))
+    expectations = analyst.get("expectations") if isinstance(analyst.get("expectations"), dict) else {}
+    primary_expectation = expectations.get("primary") if isinstance(expectations, dict) else None
+    primary_expectation = primary_expectation if isinstance(primary_expectation, dict) else {}
+    eps_expectation = primary_expectation.get("eps") if isinstance(primary_expectation.get("eps"), dict) else {}
+    eps_change_30d = finite_number(eps_expectation.get("change30d"))
+    eps_change_60d = finite_number(eps_expectation.get("change60d"))
 
     consensus_score = clamp(((bullish_share or 0.5) - 0.55) / 0.35 * 100)
     target_score = clamp((target_upside - 5) / 35 * 100)
@@ -287,6 +444,8 @@ def compute_crowding_score(
         evidence.append("目标价隐含空间偏乐观")
     if revision_score >= 70 and raises >= 2:
         evidence.append("近期目标价集中上调")
+    if raises > cuts and any(value is not None and value < 0 for value in (eps_change_30d, eps_change_60d)):
+        evidence.append("目标价上调但EPS预期下调")
     # A deep drawdown with sticky ratings is already a meaningful divergence even
     # when the latest five sessions bounce. 45 roughly corresponds to a 25%+
     # three-month drawdown after the stickiness discount.
@@ -314,6 +473,9 @@ def compute_crowding_score(
             "bullishShare": round((bullish_share or 0) * 100, 1),
             "bullishShare3mAgo": round(prior_bullish_share * 100, 1) if prior_bullish_share is not None else None,
             "targetMean": round(target_mean, 2),
+            "targetMedian": round(float(analyst.get("targetMedian") or target_mean), 2),
+            "targetLow": round(float(analyst.get("targetLow") or target_mean), 2),
+            "targetHigh": round(float(analyst.get("targetHigh") or target_mean), 2),
             "targetUpside": round(target_upside, 1),
             "return5d": round(return_5d, 1),
             "return20d": round(return_20d, 1),
@@ -321,7 +483,10 @@ def compute_crowding_score(
             "targetRaises45d": raises,
             "targetCuts45d": cuts,
             "analystCount": int(analyst.get("analystCount") or 0),
+            "epsChange30d": eps_change_30d,
+            "epsChange60d": eps_change_60d,
         },
+        "expectations": expectations,
     }
 
 
@@ -380,11 +545,22 @@ def fetch_market_series(driver_id: str, symbol: str) -> dict[str, object]:
     timestamps = result.get("timestamp") or []
     quote_rows = result.get("indicators", {}).get("quote") or []
     closes = quote_rows[0].get("close") if quote_rows else []
-    points = [
-        (int(timestamp), float(close))
-        for timestamp, close in zip(timestamps, closes)
-        if finite_number(close) is not None
-    ]
+    volumes = quote_rows[0].get("volume") if quote_rows else []
+    records = []
+    for index, (timestamp, close) in enumerate(zip(timestamps, closes)):
+        clean_close = finite_number(close)
+        if clean_close is None:
+            continue
+        volume = finite_number(volumes[index]) if index < len(volumes) else None
+        records.append(
+            {
+                "timestamp": int(timestamp),
+                "date": datetime.fromtimestamp(int(timestamp), timezone.utc).date().isoformat(),
+                "close": float(clean_close),
+                "volume": int(volume) if volume is not None else None,
+            }
+        )
+    points = [(int(item["timestamp"]), float(item["close"])) for item in records]
     if len(points) < 25:
         raise ValueError(f"{symbol} insufficient history")
     regular_price = finite_number(meta.get("regularMarketPrice"))
@@ -400,10 +576,195 @@ def fetch_market_series(driver_id: str, symbol: str) -> dict[str, object]:
         "updatedAt": updated_at,
         "points": points,
         "closes": [point[1] for point in points],
+        "records": records,
     }
 
 
-def fetch_institutional_crowding(ticker: str, company: str) -> dict[str, object]:
+def return_between_dates(records: list[dict[str, object]], start_date: str, end_date: str) -> float | None:
+    usable = [item for item in records if start_date <= str(item.get("date")) <= end_date]
+    if len(usable) < 2:
+        return None
+    start = finite_number(usable[0].get("close"))
+    end = finite_number(usable[-1].get("close"))
+    return percent_change(end, start)
+
+
+def build_earnings_window(
+    market: dict[str, object],
+    benchmark: dict[str, object] | None,
+    earnings_date: str | None,
+) -> dict[str, object]:
+    records = list(market.get("records") or [])
+    if not earnings_date or len(records) < 25:
+        return {"status": "unavailable", "reason": "缺少最近财报日期或行情序列"}
+    event_day = earnings_date[:10]
+    event_index = max((index for index, item in enumerate(records) if str(item.get("date")) <= event_day), default=-1)
+    if event_index < 0 or event_index >= len(records) - 1:
+        return {"status": "unavailable", "reason": "财报事件尚未形成价格窗口", "eventDate": event_day}
+    baseline = records[event_index]
+    benchmark_records = list(benchmark.get("records") or []) if benchmark else []
+
+    def window(days: int) -> dict[str, float | None]:
+        end_index = min(event_index + days, len(records) - 1)
+        end_record = records[end_index]
+        stock_return = percent_change(
+            finite_number(end_record.get("close")),
+            finite_number(baseline.get("close")),
+        )
+        sector_return = return_between_dates(benchmark_records, str(baseline.get("date")), str(end_record.get("date")))
+        excess = round(stock_return - sector_return, 1) if stock_return is not None and sector_return is not None else None
+        return {"stock": stock_return, "sector": sector_return, "excess": excess}
+
+    day_1 = window(1)
+    day_5 = window(5)
+    day_20 = window(20)
+    reaction_index = min(event_index + 1, len(records) - 1)
+    prior_volumes = [
+        finite_number(item.get("volume"))
+        for item in records[max(0, event_index - 20):event_index]
+        if finite_number(item.get("volume")) is not None
+    ]
+    reaction_volume = finite_number(records[reaction_index].get("volume"))
+    average_volume = fmean(prior_volumes) if prior_volumes else None
+    volume_ratio = round(reaction_volume / average_volume, 2) if reaction_volume and average_volume else None
+    excess_20d = finite_number(day_20.get("excess"))
+    stock_20d = finite_number(day_20.get("stock"))
+    if excess_20d is not None and excess_20d <= -8 and (volume_ratio or 0) >= 1.4:
+        classification = "company_specific_distribution"
+        label = "公司特异性派发"
+        explanation = "财报后显著跑输SOXX且反应日放量，不能仅用行业去杠杆解释。"
+    elif excess_20d is not None and excess_20d <= -5:
+        classification = "company_specific_weakness"
+        label = "公司特异性走弱"
+        explanation = "财报后明显跑输SOXX，公司自身预期差占主导。"
+    elif stock_20d is not None and stock_20d <= -5 and excess_20d is not None and abs(excess_20d) < 3:
+        classification = "sector_driven"
+        label = "行业因素主导"
+        explanation = "个股与SOXX同步走弱，暂不把回撤单独归因于公司基本面。"
+    elif excess_20d is not None and excess_20d >= 3:
+        classification = "relative_strength"
+        label = "财报后相对强势"
+        explanation = "财报后跑赢SOXX，机构乐观仍有价格确认。"
+    else:
+        classification = "mixed"
+        label = "混合驱动"
+        explanation = "行业与公司因素交织，等待更完整的20日事件窗口。"
+    return {
+        "status": "complete" if event_index + 20 < len(records) else "developing",
+        "eventDate": event_day,
+        "benchmark": CROWDING_BENCHMARK,
+        "day1": day_1,
+        "day5": day_5,
+        "day20": day_20,
+        "reactionVolumeRatio": volume_ratio,
+        "classification": classification,
+        "label": label,
+        "explanation": explanation,
+    }
+
+
+def build_downgrade_lag(
+    market: dict[str, object],
+    target_events: list[dict[str, object]],
+    drawdown_trigger: float = -15.0,
+) -> dict[str, object]:
+    records = list(market.get("records") or [])[-90:]
+    if len(records) < 20:
+        return {"status": "unavailable", "reason": "行情历史不足"}
+    peak_index = max(range(len(records)), key=lambda index: float(records[index].get("close") or 0))
+    peak = records[peak_index]
+    peak_price = finite_number(peak.get("close"))
+    break_record = None
+    for record in records[peak_index + 1:]:
+        drawdown = percent_change(finite_number(record.get("close")), peak_price)
+        if drawdown is not None and drawdown <= drawdown_trigger:
+            break_record = record
+            break
+    if not break_record:
+        return {
+            "status": "not_triggered",
+            "peakDate": peak.get("date"),
+            "peakPrice": peak_price,
+            "label": "尚未触发15%回撤",
+        }
+    break_date = str(break_record.get("date"))
+    first_cut = next(
+        (item for item in target_events if item.get("type") == "target_cut" and str(item.get("date", ""))[:10] >= break_date),
+        None,
+    )
+    break_dt = datetime.fromisoformat(break_date).date()
+    if first_cut:
+        cut_date = str(first_cut.get("date"))[:10]
+        lag_days = (datetime.fromisoformat(cut_date).date() - break_dt).days
+        return {
+            "status": "cut_after_price",
+            "peakDate": peak.get("date"),
+            "breakDate": break_date,
+            "firstCutDate": cut_date,
+            "lagDays": lag_days,
+            "label": f"股价先跌，目标价晚{lag_days}天才下调",
+        }
+    current_drawdown = percent_change(finite_number(records[-1].get("close")), peak_price)
+    if current_drawdown is not None and current_drawdown > drawdown_trigger:
+        return {
+            "status": "recovered_without_cut",
+            "peakDate": peak.get("date"),
+            "breakDate": break_date,
+            "firstCutDate": None,
+            "lagDays": None,
+            "currentDrawdown": current_drawdown,
+            "label": f"曾触发回撤，现已修复至{current_drawdown:.1f}%",
+        }
+    waiting_days = (datetime.now(timezone.utc).date() - break_dt).days
+    return {
+        "status": "waiting_for_cut",
+        "peakDate": peak.get("date"),
+        "breakDate": break_date,
+        "firstCutDate": None,
+        "lagDays": None,
+        "waitingDays": waiting_days,
+        "label": f"股价已先跌{waiting_days}天，机构尚未下调",
+    }
+
+
+def build_price_timeline(
+    market: dict[str, object],
+    benchmark: dict[str, object] | None,
+    limit: int = 100,
+) -> list[dict[str, object]]:
+    records = list(market.get("records") or [])[-limit:]
+    benchmark_by_date = {
+        str(item.get("date")): finite_number(item.get("close"))
+        for item in (benchmark.get("records") or [] if benchmark else [])
+    }
+    first_price = finite_number(records[0].get("close")) if records else None
+    first_benchmark = next(
+        (benchmark_by_date.get(str(item.get("date"))) for item in records if benchmark_by_date.get(str(item.get("date"))) is not None),
+        None,
+    )
+    timeline = []
+    for item in records:
+        date = str(item.get("date"))
+        price = finite_number(item.get("close"))
+        benchmark_price = benchmark_by_date.get(date)
+        timeline.append(
+            {
+                "date": date,
+                "price": round(price, 2) if price is not None else None,
+                "priceIndex": round(price / first_price * 100, 2) if price is not None and first_price else None,
+                "sectorIndex": round(benchmark_price / first_benchmark * 100, 2)
+                if benchmark_price is not None and first_benchmark else None,
+                "volume": item.get("volume"),
+            }
+        )
+    return timeline
+
+
+def fetch_institutional_crowding(
+    ticker: str,
+    company: str,
+    benchmark: dict[str, object] | None = None,
+) -> dict[str, object]:
     analysis_url = f"https://finance.yahoo.com/quote/{quote(ticker)}/analysis/"
     response = curl_requests.get(analysis_url, impersonate="chrome", timeout=18)
     response.raise_for_status()
@@ -416,6 +777,8 @@ def fetch_institutional_crowding(ticker: str, company: str) -> dict[str, object]
     recent_high = max(closes[-63:]) if closes else current
     drawdown_3m = (current / recent_high - 1) * 100 if recent_high else 0.0
     scored = compute_crowding_score(analyst, current, return_5d, return_20d, drawdown_3m)
+    earnings_calendar = analyst.get("earningsCalendar") if isinstance(analyst.get("earningsCalendar"), dict) else {}
+    target_events = list(analyst.get("targetEvents") or [])
     return {
         "ticker": ticker,
         "company": company,
@@ -423,6 +786,11 @@ def fetch_institutional_crowding(ticker: str, company: str) -> dict[str, object]
         "updatedAt": market.get("updatedAt"),
         "sourceName": "Yahoo Finance Analysis + Market Data",
         "sourceUrl": analysis_url,
+        "earningsCalendar": earnings_calendar,
+        "earningsWindow": build_earnings_window(market, benchmark, earnings_calendar.get("lastCallDate")),
+        "downgradeLag": build_downgrade_lag(market, target_events),
+        "targetEvents": target_events[-60:],
+        "priceTimeline": build_price_timeline(market, benchmark),
         **scored,
     }
 
@@ -743,6 +1111,143 @@ def decorate_policy_events(events: list[dict[str, object]], index_value: float) 
     return output
 
 
+def load_crowding_history() -> dict[str, object]:
+    if not CROWDING_HISTORY_FILE.exists():
+        return {"version": "1.0", "updatedAt": None, "snapshots": []}
+    try:
+        with CROWDING_HISTORY_FILE.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {"version": "1.0", "updatedAt": None, "snapshots": []}
+    if not isinstance(payload.get("snapshots"), list):
+        payload["snapshots"] = []
+    return payload
+
+
+def ticker_history(history: dict[str, object], ticker: str) -> list[dict[str, object]]:
+    output = []
+    for snapshot in history.get("snapshots", []):
+        if not isinstance(snapshot, dict):
+            continue
+        row = next(
+            (item for item in snapshot.get("rows", []) if isinstance(item, dict) and item.get("ticker") == ticker),
+            None,
+        )
+        if row:
+            output.append({"date": snapshot.get("date"), **row})
+    return sorted(output, key=lambda item: str(item.get("date") or ""))
+
+
+def historical_point(rows: list[dict[str, object]], days_ago: int) -> dict[str, object] | None:
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=days_ago)
+    eligible = []
+    for row in rows:
+        try:
+            row_date = datetime.fromisoformat(str(row.get("date"))).date()
+        except ValueError:
+            continue
+        if row_date <= cutoff:
+            eligible.append(row)
+    return eligible[-1] if eligible else None
+
+
+def apply_crowding_history(row: dict[str, object], history: dict[str, object]) -> dict[str, object]:
+    ticker = str(row.get("ticker") or "")
+    rows = ticker_history(history, ticker)
+    expectations = row.get("expectations") if isinstance(row.get("expectations"), dict) else {}
+    primary = expectations.get("primary") if isinstance(expectations, dict) else None
+    primary = primary if isinstance(primary, dict) else {}
+    revenue = primary.get("revenue") if isinstance(primary.get("revenue"), dict) else {}
+    current_revenue = finite_number(revenue.get("current"))
+    point_30 = historical_point(rows, 30)
+    point_60 = historical_point(rows, 60)
+
+    def snapshot_revenue(point: dict[str, object] | None) -> float | None:
+        return finite_number(point.get("revenueEstimate")) if point else None
+
+    revenue_30 = snapshot_revenue(point_30)
+    revenue_60 = snapshot_revenue(point_60)
+    if revenue:
+        revenue.update(
+            {
+                "value30dAgo": revenue_30,
+                "value60dAgo": revenue_60,
+                "change30d": percent_change(current_revenue, revenue_30),
+                "change60d": percent_change(current_revenue, revenue_60),
+                "historyStatus": "ready" if revenue_30 is not None else "collecting",
+            }
+        )
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    metrics["revenueChange30d"] = revenue.get("change30d") if revenue else None
+    metrics["revenueChange60d"] = revenue.get("change60d") if revenue else None
+    prior_7d = historical_point(rows, 7)
+    prior_score = finite_number(prior_7d.get("score")) if prior_7d else None
+    current_score = finite_number(row.get("score"))
+    row["scoreChange7d"] = round(current_score - prior_score, 1) if current_score is not None and prior_score is not None else None
+    row["historyStatus"] = {
+        "points": len(rows),
+        "firstDate": rows[0].get("date") if rows else None,
+        "lastDate": rows[-1].get("date") if rows else None,
+        "revenue30dReady": revenue_30 is not None,
+        "revenue60dReady": revenue_60 is not None,
+    }
+    row["dailyHistory"] = rows[-120:]
+    target_actions = metrics.get("targetRaises45d", 0), metrics.get("targetCuts45d", 0)
+    eps_down = any(
+        finite_number(metrics.get(key)) is not None and float(metrics[key]) < 0
+        for key in ("epsChange30d", "epsChange60d")
+    )
+    revenue_down = any(
+        finite_number(metrics.get(key)) is not None and float(metrics[key]) < 0
+        for key in ("revenueChange30d", "revenueChange60d")
+    )
+    target_up = int(target_actions[0] or 0) > int(target_actions[1] or 0)
+    if target_up and (eps_down or revenue_down):
+        evidence = list(row.get("evidence") or [])
+        label = "目标价上调但盈利预期下调"
+        if label not in evidence:
+            evidence.append(label)
+        row["evidence"] = evidence
+        row["expectationDivergence"] = {
+            "status": "warning",
+            "label": label,
+            "epsDown": eps_down,
+            "revenueDown": revenue_down,
+        }
+    else:
+        row["expectationDivergence"] = {
+            "status": "clear" if any(value is not None for value in (
+                metrics.get("epsChange30d"), metrics.get("revenueChange30d")
+            )) else "collecting",
+            "label": "盈利预期未与目标价形成负向背离" if not (eps_down or revenue_down) else "等待目标价方向确认",
+            "epsDown": eps_down,
+            "revenueDown": revenue_down,
+        }
+    return row
+
+
+def snapshot_row(row: dict[str, object]) -> dict[str, object]:
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    expectations = row.get("expectations") if isinstance(row.get("expectations"), dict) else {}
+    primary = expectations.get("primary") if isinstance(expectations, dict) else None
+    primary = primary if isinstance(primary, dict) else {}
+    eps = primary.get("eps") if isinstance(primary.get("eps"), dict) else {}
+    revenue = primary.get("revenue") if isinstance(primary.get("revenue"), dict) else {}
+    return {
+        "ticker": row.get("ticker"),
+        "score": row.get("score"),
+        "zone": row.get("zone"),
+        "currentPrice": row.get("currentPrice"),
+        "targetMean": metrics.get("targetMean"),
+        "targetMedian": metrics.get("targetMedian"),
+        "bullishShare": metrics.get("bullishShare"),
+        "epsEstimate": eps.get("current"),
+        "revenueEstimate": revenue.get("current"),
+        "targetRaises45d": metrics.get("targetRaises45d"),
+        "targetCuts45d": metrics.get("targetCuts45d"),
+    }
+
+
 def build_crowding_payload(rows: list[dict[str, object]], errors: dict[str, str]) -> dict[str, object]:
     ranked = sorted(rows, key=lambda item: float(item.get("score", 0)), reverse=True)
     aggregate = round(fmean(float(item.get("score", 0)) for item in ranked), 1) if ranked else None
@@ -758,7 +1263,8 @@ def build_crowding_payload(rows: list[dict[str, object]], errors: dict[str, str]
         "errors": errors,
         "method": (
             "买入评级一致性30% / 目标价乐观度20% / 近期目标价上调集中度20% / "
-            "价格走弱但评级未松动30%。至少两项证据同时成立，才标记派发风险。"
+            "价格走弱但评级未松动30%。EPS/收入修正、财报后SOXX超额收益与机构补降滞后作为确认层；"
+            "至少两项证据同时成立，才标记派发风险。"
         ),
         "boundary": "机构拥挤度是反向风险提示，不是顶部确认，也不替代营收、利润、订单和现金流判断。",
     }
@@ -890,6 +1396,39 @@ def build_history(
     return output
 
 
+def fetch_crowding_dataset() -> tuple[list[dict[str, object]], dict[str, str], dict[str, object] | None]:
+    benchmark = None
+    errors: dict[str, str] = {}
+    try:
+        benchmark = fetch_market_series("crowding_benchmark", CROWDING_BENCHMARK)
+    except Exception as error:
+        errors[CROWDING_BENCHMARK] = str(error)
+    rows: list[dict[str, object]] = []
+    with ThreadPoolExecutor(max_workers=len(CROWDING_WATCHLIST)) as executor:
+        futures = {
+            executor.submit(fetch_institutional_crowding, ticker, company, benchmark): ticker
+            for ticker, company in CROWDING_WATCHLIST.items()
+        }
+        for future in as_completed(futures):
+            ticker = futures[future]
+            try:
+                rows.append(future.result())
+            except Exception as error:
+                errors[ticker] = str(error)
+    return rows, errors, benchmark
+
+
+def build_crowding_snapshot() -> dict[str, object]:
+    rows, errors, _ = fetch_crowding_dataset()
+    now = datetime.now(timezone.utc)
+    return {
+        "date": now.date().isoformat(),
+        "asOf": now.isoformat(),
+        "rows": [snapshot_row(row) for row in sorted(rows, key=lambda item: str(item.get("ticker")))],
+        "errors": errors,
+    }
+
+
 def build_policy_payload() -> dict[str, object]:
     fallback = load_fallback()
     tasks = {
@@ -930,20 +1469,19 @@ def build_policy_payload() -> dict[str, object]:
     else:
         drivers.append(fallback_driver("inflation", fallback, errors.get("inflation", "source unavailable")))
 
-    crowding_rows: list[dict[str, object]] = []
-    crowding_errors: dict[str, str] = {}
-    with ThreadPoolExecutor(max_workers=len(CROWDING_WATCHLIST)) as executor:
-        crowding_futures = {
-            executor.submit(fetch_institutional_crowding, ticker, company): ticker
-            for ticker, company in CROWDING_WATCHLIST.items()
-        }
-        for future in as_completed(crowding_futures):
-            ticker = crowding_futures[future]
-            try:
-                crowding_rows.append(future.result())
-            except Exception as error:
-                crowding_errors[ticker] = str(error)
+    crowding_rows, crowding_errors, crowding_benchmark = fetch_crowding_dataset()
+    crowding_history = load_crowding_history()
+    crowding_rows = [apply_crowding_history(row, crowding_history) for row in crowding_rows]
     crowding = build_crowding_payload(crowding_rows, crowding_errors)
+    crowding["benchmark"] = {
+        "ticker": CROWDING_BENCHMARK,
+        "status": "live" if crowding_benchmark else "unavailable",
+        "updatedAt": crowding_benchmark.get("updatedAt") if crowding_benchmark else None,
+    }
+    crowding["history"] = {
+        "updatedAt": crowding_history.get("updatedAt"),
+        "snapshotCount": len(crowding_history.get("snapshots", [])),
+    }
 
     weighted_total = sum(float(item["pressureScore"]) * float(item["weight"]) for item in drivers)
     total_weight = sum(float(item["weight"]) for item in drivers) or 1.0
@@ -993,7 +1531,7 @@ def build_policy_payload() -> dict[str, object]:
     scenario_matrix = build_scenario_matrix(index_value, crowding_score)
     return {
         "asOf": datetime.now(timezone.utc).isoformat(),
-        "version": "0.3-policy-intelligence",
+        "version": "0.4-expectations-event-history",
         "status": "live" if fallback_count == 0 else "partial",
         "cacheSeconds": POLICY_CACHE_SECONDS,
         "summary": (

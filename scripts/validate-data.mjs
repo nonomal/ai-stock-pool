@@ -33,3 +33,14 @@ if (!policySnapshot.scenarioMatrix?.current || policySnapshot.scenarioMatrix?.sc
   throw new Error("tpi-latest.json must contain the four policy and crowding scenarios");
 }
 console.log(`tpi-latest.json: ${policySnapshot.version} policy intelligence fallback`);
+
+const crowdingHistory = JSON.parse(await readFile(resolve(root, "institutional-crowding-history.json"), "utf8"));
+if (!Array.isArray(crowdingHistory.snapshots)) {
+  throw new Error("institutional-crowding-history.json snapshots must be an array");
+}
+for (const snapshot of crowdingHistory.snapshots) {
+  if (!snapshot.date || !Array.isArray(snapshot.rows) || snapshot.rows.length < 1) {
+    throw new Error("institutional-crowding-history.json contains an invalid snapshot");
+  }
+}
+console.log(`institutional-crowding-history.json: ${crowdingHistory.snapshots.length} point-in-time snapshots`);

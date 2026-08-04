@@ -1,0 +1,40 @@
+name: Institutional crowding snapshot
+
+on:
+  schedule:
+    - cron: "30 2 * * 2-6"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: institutional-crowding-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Capture point-in-time snapshot
+        run: python crowding_snapshot.py
+      - name: Validate policy model
+        run: python -m unittest tests/test_policy_engine.py
+      - name: Commit snapshot when changed
+        run: |
+          if git diff --quiet -- institutional-crowding-history.json; then
+            echo "No snapshot change"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add institutional-crowding-history.json
+          git commit -m "Update institutional crowding snapshot"
+          git push

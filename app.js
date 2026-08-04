@@ -252,7 +252,9 @@ const policyState = {
   loaded: false,
   loading: false,
   error: null,
-  timer: null
+  timer: null,
+  crowdingMode: "risk",
+  crowdingTicker: null
 };
 
 const candidateActions = {
@@ -1430,6 +1432,95 @@ function policyZoneExplanation(zone) {
   return values[zone] || "需要结合政策行动和事件时间线继续验证。";
 }
 
+function formatPolicyPercent(value, digits = 1, fallback = "积累中") {
+  if (value === null || value === undefined || value === "") return fallback;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return `${number >= 0 ? "+" : ""}${number.toFixed(digits)}%`;
+}
+
+function sortCrowdingRows(rows, mode) {
+  const sorted = [...rows];
+  if (mode === "earnings") {
+    const rank = { company_specific_distribution: 0, company_specific_weakness: 1, mixed: 2, sector_driven: 3, relative_strength: 4 };
+    return sorted.sort((left, right) => {
+      const leftRank = rank[left.earningsWindow?.classification] ?? 5;
+      const rightRank = rank[right.earningsWindow?.classification] ?? 5;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return Number(left.earningsWindow?.day20?.excess ?? 999) - Number(right.earningsWindow?.day20?.excess ?? 999);
+    });
+  }
+  if (mode === "lag") {
+    const rank = { waiting_for_cut: 0, cut_after_price: 1, recovered_without_cut: 2, not_triggered: 3, unavailable: 4 };
+    return sorted.sort((left, right) => {
+      const leftRank = rank[left.downgradeLag?.status] ?? 5;
+      const rightRank = rank[right.downgradeLag?.status] ?? 5;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return Number(right.downgradeLag?.waitingDays || right.downgradeLag?.lagDays || 0)
+        - Number(left.downgradeLag?.waitingDays || left.downgradeLag?.lagDays || 0);
+    });
+  }
+  return sorted.sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
+}
+
+function buildCrowdingTimeline(row) {
+  const timeline = Array.isArray(row?.priceTimeline) ? row.priceTimeline.filter((item) => Number.isFinite(Number(item.priceIndex))) : [];
+  if (timeline.length < 2) return `<div class="policy-timeline-empty">价格时间线暂不可用</div>`;
+  const width = 960;
+  const height = 270;
+  const padding = { top: 28, right: 26, bottom: 35, left: 44 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  const values = timeline.flatMap((item) => [Number(item.priceIndex), Number(item.sectorIndex)]).filter(Number.isFinite);
+  const minimum = Math.min(...values);
+  const maximum = Math.max(...values);
+  const span = Math.max(8, maximum - minimum);
+  const yMinimum = minimum - span * 0.12;
+  const yMaximum = maximum + span * 0.12;
+  const xAt = (index) => padding.left + (index / Math.max(1, timeline.length - 1)) * chartWidth;
+  const yAt = (value) => padding.top + ((yMaximum - value) / Math.max(1, yMaximum - yMinimum)) * chartHeight;
+  const pathFor = (key) => timeline.map((item, index) => {
+    const value = Number(item[key]);
+    if (!Number.isFinite(value)) return "";
+    return `${index === 0 ? "M" : "L"}${xAt(index).toFixed(1)},${yAt(value).toFixed(1)}`;
+  }).join(" ");
+  const indexForDate = (date) => {
+    const exact = timeline.findIndex((item) => item.date >= String(date || "").slice(0, 10));
+    return exact >= 0 ? exact : timeline.length - 1;
+  };
+  const targetEvents = (row.targetEvents || []).filter((event) => {
+    const date = String(event.date || "").slice(0, 10);
+    return date >= timeline[0].date && date <= timeline[timeline.length - 1].date && ["target_raise", "target_cut"].includes(event.type);
+  });
+  const eventLines = targetEvents.map((event) => {
+    const x = xAt(indexForDate(event.date));
+    const isCut = event.type === "target_cut";
+    return `<g class="${isCut ? "is-cut" : "is-raise"}"><line x1="${x}" y1="${padding.top}" x2="${x}" y2="${height - padding.bottom}"/><circle cx="${x}" cy="${padding.top + 6}" r="4"><title>${escapeHtml(event.firm || "机构")} · ${escapeHtml(event.label || "目标价调整")}</title></circle></g>`;
+  }).join("");
+  const earningsDate = row.earningsWindow?.eventDate;
+  const earningsLine = earningsDate && earningsDate >= timeline[0].date && earningsDate <= timeline[timeline.length - 1].date
+    ? `<g class="is-earnings"><line x1="${xAt(indexForDate(earningsDate))}" y1="${padding.top}" x2="${xAt(indexForDate(earningsDate))}" y2="${height - padding.bottom}"/><text x="${xAt(indexForDate(earningsDate)) + 5}" y="${padding.top + 14}">财报</text></g>`
+    : "";
+  const breakDate = row.downgradeLag?.breakDate;
+  const breakLine = breakDate && breakDate >= timeline[0].date && breakDate <= timeline[timeline.length - 1].date
+    ? `<g class="is-break"><line x1="${xAt(indexForDate(breakDate))}" y1="${padding.top}" x2="${xAt(indexForDate(breakDate))}" y2="${height - padding.bottom}"/><text x="${xAt(indexForDate(breakDate)) + 5}" y="${height - padding.bottom - 8}">-15%</text></g>`
+    : "";
+  const grid = [0, 0.5, 1].map((ratio) => {
+    const value = yMaximum - (yMaximum - yMinimum) * ratio;
+    const y = padding.top + chartHeight * ratio;
+    return `<g class="policy-timeline-grid"><line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}"/><text x="4" y="${y + 3}">${value.toFixed(0)}</text></g>`;
+  }).join("");
+  return `<div class="policy-timeline-chart">
+    <div class="policy-timeline-legend"><span class="stock">个股</span><span class="sector">SOXX</span><span class="raise">目标价上调</span><span class="cut">目标价下调</span></div>
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(row.ticker || "个股")}相对SOXX、财报和目标价调整时间线">
+      ${grid}<path class="sector-line" d="${pathFor("sectorIndex")}"/><path class="stock-line" d="${pathFor("priceIndex")}"/>
+      ${eventLines}${earningsLine}${breakLine}
+      <text class="axis-date" x="${padding.left}" y="${height - 8}">${escapeHtml(timeline[0].date.slice(5))}</text>
+      <text class="axis-date" text-anchor="end" x="${width - padding.right}" y="${height - 8}">${escapeHtml(timeline[timeline.length - 1].date.slice(5))}</text>
+    </svg>
+  </div>`;
+}
+
 function renderPolicy() {
   const panel = document.getElementById("policyPanel");
   if (!panel) return;
@@ -1452,6 +1543,11 @@ function renderPolicy() {
   const policyEvents = Array.isArray(payload.policyEvents) ? payload.policyEvents : [];
   const crowding = payload.institutionalCrowding || {};
   const crowdingRows = Array.isArray(crowding.rows) ? crowding.rows : [];
+  const crowdingDisplayRows = sortCrowdingRows(crowdingRows, policyState.crowdingMode);
+  const selectedCrowdingRow = crowdingRows.find((row) => row.ticker === policyState.crowdingTicker)
+    || crowdingDisplayRows[0]
+    || null;
+  if (selectedCrowdingRow) policyState.crowdingTicker = selectedCrowdingRow.ticker;
   const scenarioMatrix = payload.scenarioMatrix || {};
   const scenarios = Array.isArray(scenarioMatrix.scenarios) ? scenarioMatrix.scenarios : [];
   const sourceHealth = Array.isArray(payload.sourceHealth) ? payload.sourceHealth : [];
@@ -1465,6 +1561,13 @@ function renderPolicy() {
     - Number(left.pressureScore || 0) * Number(left.weight || 0)
   ));
   const topDrivers = sortedDrivers.slice(0, 3);
+  const selectedCrowdingMetrics = selectedCrowdingRow?.metrics || {};
+  const selectedExpectation = selectedCrowdingRow?.expectations?.primary || {};
+  const selectedEps = selectedExpectation.eps || {};
+  const selectedRevenue = selectedExpectation.revenue || {};
+  const selectedEarningsWindow = selectedCrowdingRow?.earningsWindow || {};
+  const selectedLag = selectedCrowdingRow?.downgradeLag || {};
+  const selectedHistory = selectedCrowdingRow?.historyStatus || {};
 
   panel.innerHTML = `
     <section class="policy-live-bar">
@@ -1559,28 +1662,62 @@ function renderPolicy() {
         <div><span>高风险标的</span><strong>${Number(crowding.highRiskCount || 0)}</strong></div>
         <p>${escapeHtml(crowding.boundary || "机构拥挤度是反向风险提示，不是顶部确认。")}</p>
       </div>
+      <div class="policy-crowding-toolbar" role="tablist" aria-label="机构反向信号视图">
+        <button type="button" data-crowding-mode="risk" class="${policyState.crowdingMode === "risk" ? "active" : ""}">当前风险排行</button>
+        <button type="button" data-crowding-mode="earnings" class="${policyState.crowdingMode === "earnings" ? "active" : ""}">财报后派发</button>
+        <button type="button" data-crowding-mode="lag" class="${policyState.crowdingMode === "lag" ? "active" : ""}">机构补降</button>
+        <span>SOXX行业基准 · ${Number(crowding.history?.snapshotCount || 0)}个每日快照</span>
+      </div>
       ${crowdingRows.length ? `<div class="policy-crowding-grid">
-        ${crowdingRows.map((row) => {
+        ${crowdingDisplayRows.map((row) => {
           const metrics = row.metrics || {};
           const ticker = String(row.ticker || "");
           const tickerLabel = stockByTicker.has(ticker)
             ? `<button type="button" data-policy-ticker="${escapeHtml(ticker)}">${escapeHtml(ticker)}</button>`
             : `<strong>${escapeHtml(ticker)}</strong>`;
-          return `<article class="policy-crowding-card ${escapeHtml(row.zone || "balanced")}">
+          const eventExcess = row.earningsWindow?.day20?.excess;
+          return `<article class="policy-crowding-card ${escapeHtml(row.zone || "balanced")} ${ticker === selectedCrowdingRow?.ticker ? "is-selected" : ""}">
             <div class="policy-crowding-head"><div>${tickerLabel}<span>${escapeHtml(row.company || "")}</span></div><b>${Number(row.score || 0).toFixed(0)} · ${escapeHtml(row.label || "观察")}</b></div>
             <div class="policy-crowding-metrics">
               <span>买入占比 <strong>${Number(metrics.bullishShare || 0).toFixed(0)}%</strong></span>
               <span>目标空间 <strong>${Number(metrics.targetUpside || 0) >= 0 ? "+" : ""}${Number(metrics.targetUpside || 0).toFixed(1)}%</strong></span>
-              <span>5日价格 <strong>${Number(metrics.return5d || 0) >= 0 ? "+" : ""}${Number(metrics.return5d || 0).toFixed(1)}%</strong></span>
+              <span>EPS 30日 <strong>${formatPolicyPercent(metrics.epsChange30d)}</strong></span>
+              <span>财报后超额 <strong>${formatPolicyPercent(eventExcess, 1, "待财报")}</strong></span>
               <span>45日调价 <strong>${Number(metrics.targetRaises45d || 0)}升 / ${Number(metrics.targetCuts45d || 0)}降</strong></span>
+              <span>风险7日变化 <strong>${formatPolicyPercent(row.scoreChange7d, 1, "积累中").replace("%", "")}</strong></span>
             </div>
             <div class="policy-crowding-evidence">
               ${(row.evidence || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("") || "<span>尚未形成多证据共振</span>"}
             </div>
+            <button type="button" class="policy-crowding-detail-button" data-crowding-detail="${escapeHtml(ticker)}">查看预期、财报与补降时间线</button>
             <footer><span>${escapeHtml(row.sourceName || "")}</span><time>${escapeHtml(formatPolicyTime(row.updatedAt))}</time></footer>
           </article>`;
         }).join("")}
       </div>` : `<div class="policy-crowding-empty">分析师覆盖暂时不可用，本模块不使用虚构数据填补。</div>`}
+      ${selectedCrowdingRow ? `<section class="policy-crowding-detail">
+        <header>
+          <div><span>POINT-IN-TIME DIVERGENCE</span><h4>${escapeHtml(selectedCrowdingRow.ticker)} · ${escapeHtml(selectedCrowdingRow.company || "")}</h4></div>
+          <div><strong>${escapeHtml(selectedCrowdingRow.expectationDivergence?.label || "等待预期修正确认")}</strong><span>${escapeHtml(selectedLag.label || "下调滞后积累中")}</span></div>
+        </header>
+        <div class="policy-expectation-grid">
+          <article><span>EPS 30日修正</span><strong class="${Number(selectedEps.change30d) < 0 ? "negative" : "positive"}">${formatPolicyPercent(selectedEps.change30d)}</strong><small>${selectedEps.current != null ? `当前 ${Number(selectedEps.current).toFixed(2)}` : "源站未提供"}</small></article>
+          <article><span>EPS 60日修正</span><strong class="${Number(selectedEps.change60d) < 0 ? "negative" : "positive"}">${formatPolicyPercent(selectedEps.change60d)}</strong><small>${selectedEps.value60dAgo != null ? `60日前 ${Number(selectedEps.value60dAgo).toFixed(2)}` : "源站未提供"}</small></article>
+          <article><span>收入 30日修正</span><strong class="${Number(selectedRevenue.change30d) < 0 ? "negative" : "positive"}">${formatPolicyPercent(selectedRevenue.change30d)}</strong><small>${selectedHistory.revenue30dReady ? "每日快照计算" : "历史快照积累中"}</small></article>
+          <article><span>收入 60日修正</span><strong class="${Number(selectedRevenue.change60d) < 0 ? "negative" : "positive"}">${formatPolicyPercent(selectedRevenue.change60d)}</strong><small>${selectedHistory.revenue60dReady ? "每日快照计算" : "历史快照积累中"}</small></article>
+          <article><span>目标价中位数</span><strong>${selectedCrowdingMetrics.targetMedian != null ? Number(selectedCrowdingMetrics.targetMedian).toFixed(2) : "—"}</strong><small>${Number(selectedCrowdingMetrics.targetRaises45d || 0)}升 / ${Number(selectedCrowdingMetrics.targetCuts45d || 0)}降</small></article>
+          <article><span>风险分7日变化</span><strong>${selectedCrowdingRow.scoreChange7d == null ? "积累中" : `${Number(selectedCrowdingRow.scoreChange7d) >= 0 ? "+" : ""}${Number(selectedCrowdingRow.scoreChange7d).toFixed(1)}`}</strong><small>${Number(selectedHistory.points || 0)}个历史时点</small></article>
+        </div>
+        <div class="policy-earnings-window">
+          <div><span>最近财报窗口</span><strong>${escapeHtml(selectedEarningsWindow.label || "尚未形成")}</strong><p>${escapeHtml(selectedEarningsWindow.explanation || selectedEarningsWindow.reason || "等待财报后价格窗口")}</p></div>
+          ${[1, 5, 20].map((days) => {
+            const window = selectedEarningsWindow[`day${days}`] || {};
+            return `<article><span>财报后 ${days} 日</span><strong>${formatPolicyPercent(window.stock, 1, "—")}</strong><small>SOXX ${formatPolicyPercent(window.sector, 1, "—")} · 超额 ${formatPolicyPercent(window.excess, 1, "—")}</small></article>`;
+          }).join("")}
+          <article><span>反应日成交量</span><strong>${selectedEarningsWindow.reactionVolumeRatio ? `${Number(selectedEarningsWindow.reactionVolumeRatio).toFixed(2)}×` : "—"}</strong><small>相对财报前20日均量</small></article>
+        </div>
+        ${buildCrowdingTimeline(selectedCrowdingRow)}
+        <footer><span>每日快照保存风险分、目标价中位数、EPS与收入一致预期；目标价调整事件与价格曲线用于检验“股价先跌、机构后降”。</span><strong>${escapeHtml(selectedLag.label || "等待形成下调滞后序列")}</strong></footer>
+      </section>` : ""}
       <div class="policy-crowding-method">${escapeHtml(crowding.method || payload.method?.crowdingModel || "至少两项证据同时成立才提示高风险。")}</div>
     </section>
 
@@ -1681,6 +1818,21 @@ function renderPolicy() {
   `;
 
   panel.querySelector("#policyRefresh")?.addEventListener("click", () => loadPolicyData(true));
+  panel.querySelectorAll("[data-crowding-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      policyState.crowdingMode = button.dataset.crowdingMode;
+      const nextRows = sortCrowdingRows(crowdingRows, policyState.crowdingMode);
+      policyState.crowdingTicker = nextRows[0]?.ticker || policyState.crowdingTicker;
+      renderPolicy();
+    });
+  });
+  panel.querySelectorAll("[data-crowding-detail]").forEach((button) => {
+    button.addEventListener("click", () => {
+      policyState.crowdingTicker = button.dataset.crowdingDetail;
+      renderPolicy();
+      panel.querySelector(".policy-crowding-detail")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  });
   panel.querySelectorAll("[data-policy-ticker]").forEach((button) => {
     button.addEventListener("click", () => {
       const ticker = button.dataset.policyTicker;

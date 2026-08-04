@@ -1,6 +1,6 @@
 {
   "asOf": "2026-07-24T08:00:00-04:00",
-  "version": "0.3-fallback-snapshot",
+  "version": "0.4-fallback-snapshot",
   "status": "demo_snapshot",
   "summary": "利率、波动率与股市回撤同步抬升，指数进入高压区；后续重点验证是否出现政策执行延期、豁免或谈判措辞软化。",
   "index": {
@@ -91,6 +91,8 @@
     "aggregateLabel": "数据不足",
     "highRiskCount": 0,
     "coverage": { "received": 0, "requested": 6 },
+    "benchmark": { "ticker": "SOXX", "status": "unavailable", "updatedAt": null },
+    "history": { "updatedAt": null, "snapshotCount": 0 },
     "rows": [],
     "errors": { "snapshot": "实时分析师数据需要在线接口" },
     "method": "买入评级一致性30% / 目标价乐观度20% / 近期目标价上调集中度20% / 价格走弱但评级未松动30%。",

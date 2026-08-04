@@ -38,7 +38,7 @@ This project puts those questions into one inspectable data and UI model. It nev
 | Feature matrix | Compare names by chain position, theme, market, and status | `stock-pool.csv` |
 | Stock list | Search, filters, quotes, and research positioning | Stock pool + `/api/quotes` |
 | Active discovery | Joint scoring across official signals, news, arXiv, the current pool, and market position | Four discovery CSVs + reports |
-| Policy and crowding | Six pressure drivers, event stages, institutional-consensus contrarian risk, scenarios, and industry transmission | `/api/policy` + `tpi-latest.json` |
+| Policy and crowding | Six pressure drivers, EPS/revenue revisions, post-earnings attribution, delayed-cut timelines, and industry transmission | `/api/policy` + daily point-in-time snapshots |
 
 Active discovery covers:
 
@@ -51,6 +51,8 @@ Active discovery covers:
 The policy-pressure index uses six weighted drivers: net approval 25%, S&P 500 20%, US 10-year yield 15%, MOVE 15%, VIX 15%, and CPI Nowcast 10%. A high score indicates stronger market and political constraints; it does not mean a policy will necessarily be withdrawn.
 
 Institutional crowding is kept separate from policy pressure. It combines bullish-rating consensus, target-price optimism, concentrated target raises, and a price-versus-rating divergence where price weakens before analysts revise. A high target price alone is never treated as a top; the stronger distribution-risk label requires multiple confirming signals and real price divergence.
+
+The contrarian module also records next-quarter EPS consensus changes versus 30 and 60 days ago. Revenue revisions are calculated from daily point-in-time snapshots and remain explicitly marked as collecting until enough history exists. One-, five-, and twenty-day post-earnings returns are compared with SOXX and paired with reaction-day volume to separate sector effects from company-specific weakness. Target-price events, the first 15% drawdown, and daily risk snapshots form the “price fell before analysts cut” timeline.
 
 The policy-event radar covers tariffs and trade, technology and export controls, military and geopolitical actions, and fiscal or industrial-subsidy policy. It classifies escalation, execution, softening or negotiation, and monitoring. News stages do not enter the pressure score directly; formal policy text and effective dates take priority.
 
@@ -197,9 +199,11 @@ Returns quotes, missing symbols, market counts, and the data timestamp. Add `?re
 
 ### `GET /api/policy`
 
-Returns the policy-pressure score, four-part decomposition, six drivers, event stages, institutional crowding, the two-dimensional scenario matrix, industry mappings, source freshness, and error ledgers. Add `?refresh=1` to request a refetch.
+Returns the policy-pressure score, four-part decomposition, six drivers, event stages, institutional crowding, EPS/revenue revisions, earnings-event windows, SOXX-adjusted returns, target-cut lag, daily history, the two-dimensional scenario matrix, industry mappings, source freshness, and error ledgers. Add `?refresh=1` to request a refetch.
 
 The default crowding watchlist is `MU`, `NVDA`, `AMD`, `AVGO`, `MRVL`, and `SMCI`. This is contrarian risk monitoring, not top confirmation; earnings, orders, profits, and cash flow still require independent validation.
+
+The hosted site's daily automation runs `crowding_snapshot.py` after active discovery. A snapshot is written only when all six names are present, preventing a transient network failure from corrupting the point-in-time series. Self-hosters can copy `examples/crowding-snapshot.yml` into `.github/workflows/` to enable GitHub Actions. Revenue 30- and 60-day changes become available only after enough history accumulates.
 
 > Market and macro sources can be delayed, rate-limited, or temporarily unavailable. APIs report gaps or explicitly labeled fallback data.
 
@@ -213,6 +217,7 @@ The default crowding watchlist is `MU`, `NVDA`, `AMD`, `AVGO`, `MRVL`, and `SMCI
 | `discovery-candidates.csv` | Candidate scores and review state | Yes |
 | `discovery-history.csv` | Daily discovery trend | Maintained after validation |
 | `tpi-latest.json` | Policy-pressure fallback snapshot | Maintained from valid snapshots |
+| `institutional-crowding-history.json` | Daily point-in-time risk, target, EPS, and revenue snapshots | `crowding_snapshot.py` |
 
 ## Repository layout
 
@@ -225,7 +230,8 @@ app.js                   UI state, data loading, and interactions
 index.html               Page structure
 styles.css               Visual system
 discovery_engine.py      Active-discovery engine
-policy_engine.py         Policy pressure, event-stage, and crowding calculation
+policy_engine.py         Policy pressure, estimate revisions, earnings attribution, and delayed-cut calculation
+crowding_snapshot.py     Daily institutional-consensus point-in-time snapshot
 server.py                Local server and quote API
 sync_pool.py             US / A-share source merge
 vercel.json              Vercel configuration
@@ -239,7 +245,7 @@ npm run check
 node --check app.js
 PYTHONPYCACHEPREFIX=/tmp/ai-stock-pool-pycache \
   python3 -m py_compile \
-  sync_pool.py discovery_engine.py policy_engine.py server.py \
+  sync_pool.py discovery_engine.py policy_engine.py crowding_snapshot.py server.py \
   api/health.py api/quotes.py api/policy.py
 ```
 
