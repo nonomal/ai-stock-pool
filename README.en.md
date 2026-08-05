@@ -54,6 +54,8 @@ Institutional crowding is kept separate from policy pressure. It combines bullis
 
 The contrarian module also records next-quarter EPS consensus changes versus 30 and 60 days ago. Revenue revisions are calculated from daily point-in-time snapshots and remain explicitly marked as collecting until enough history exists. One-, five-, and twenty-day post-earnings returns are compared with SOXX and paired with reaction-day volume to separate sector effects from company-specific weakness. Target-price events, the first 15% drawdown, and daily risk snapshots form the “price fell before analysts cut” timeline.
 
+The policy page uses progressive disclosure. Its first reading layer keeps only the index, four pressure groups, current scenario, event stages, and one institutional-risk focus. A compact ranking controls the selected ticker, while full revisions, earnings windows, and the timeline expand on demand. Event evidence, six drivers, the decision matrix, trend history, industry transmission, and source health remain available in a secondary research layer without competing for first-screen attention.
+
 The policy-event radar covers tariffs and trade, technology and export controls, military and geopolitical actions, and fiscal or industrial-subsidy policy. It classifies escalation, execution, softening or negotiation, and monitoring. News stages do not enter the pressure score directly; formal policy text and effective dates take priority.
 
 ## Architecture

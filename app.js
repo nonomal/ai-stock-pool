@@ -254,7 +254,8 @@ const policyState = {
   error: null,
   timer: null,
   crowdingMode: "risk",
-  crowdingTicker: null
+  crowdingTicker: null,
+  crowdingExpanded: false
 };
 
 const candidateActions = {
@@ -1611,45 +1612,59 @@ function renderPolicy() {
       <article><span>下一步验证</span><strong>看行动，不只看表态</strong><p>延期、豁免、撤回或正式谈判进展才算政策软化确认。</p></article>
     </section>
 
-    ${pressureBreakdown.length ? `<section class="policy-section">
-      <div class="policy-section-head">
-        <div><span>PRESSURE DECOMPOSITION</span><h3>压力从哪里来</h3></div>
-        <p>把综合指数拆回政治、利率、市场和通胀四类约束，避免总分掩盖结构差异。</p>
+    <section class="policy-section policy-overview-section">
+      <div class="policy-section-head policy-section-head-compact">
+        <div><span>DECISION OVERVIEW</span><h3>今天先看这三件事</h3></div>
+        <p>先判断压力结构、当前情景和政策阶段，再进入单项数据研究。</p>
       </div>
-      <div class="policy-breakdown-grid">
-        ${pressureBreakdown.map((group) => `<article>
-          <div><span>${escapeHtml(group.name || group.id)}</span><strong>${Number(group.score || 0).toFixed(1)}</strong></div>
-          <div class="policy-breakdown-bar"><i style="width:${clampValue(Number(group.score || 0), 0, 100)}%"></i></div>
-          <small>${escapeHtml(group.level || "")} · ${escapeHtml((group.components || []).join(" / "))}</small>
-          <p>${escapeHtml(group.interpretation || "")}</p>
-        </article>`).join("")}
+      <div class="policy-overview-grid">
+        <div class="policy-overview-card policy-pressure-compact">
+          <header><span>四类压力</span><strong>结构比总分更重要</strong></header>
+          ${pressureBreakdown.map((group) => `<div class="policy-pressure-row">
+            <div><span>${escapeHtml(group.name || group.id)}</span><small>${escapeHtml(group.level || "")}</small></div>
+            <div class="policy-pressure-track"><i style="width:${clampValue(Number(group.score || 0), 0, 100)}%"></i></div>
+            <strong>${Number(group.score || 0).toFixed(0)}</strong>
+          </div>`).join("") || `<p class="policy-overview-empty">压力分解暂未返回。</p>`}
+        </div>
+        <div class="policy-overview-card policy-overview-scenario">
+          <header><span>当前情景</span><strong>${escapeHtml(scenarioMatrix.current?.title || "等待情景判断")}</strong></header>
+          <p>${escapeHtml(scenarioMatrix.current?.action || "等待政策压力与机构拥挤信号形成交叉验证。")}</p>
+          <div><span>压力 ${value.toFixed(0)}</span><span>拥挤 ${Number.isFinite(Number(crowding.aggregateScore)) ? Number(crowding.aggregateScore).toFixed(0) : "—"}</span></div>
+        </div>
       </div>
-    </section>` : ""}
+      ${policyEvents.length ? `<div class="policy-event-ribbon" aria-label="政策事件阶段概览">
+        <span>政策阶段</span>
+        ${policyEvents.map((event) => `<div class="${escapeHtml(event.phase || "monitoring")}"><strong>${escapeHtml(event.name || "政策事件")}</strong><small>${escapeHtml(event.phaseLabel || "持续监测")}</small></div>`).join("")}
+      </div>` : ""}
+    </section>
 
-    ${policyEvents.length ? `<section class="policy-section">
-      <div class="policy-section-head">
-        <div><span>POLICY EVENT RADAR</span><h3>政策事件：表态、执行还是软化</h3></div>
-        <p>新闻只负责定位阶段，不直接改变压力指数。正式文本、豁免清单和执行日期优先级更高。</p>
+    ${policyEvents.length ? `<details class="policy-disclosure policy-event-disclosure">
+      <summary>
+        <span><small>POLICY EVENT RADAR</small><strong>政策事件明细</strong></span>
+        <em>${policyEvents.length} 类事件 · 查看新闻、阶段与股票映射</em>
+      </summary>
+      <div class="policy-disclosure-body">
+        <div class="policy-disclosure-intro">新闻只负责定位阶段，不直接改变压力指数。正式文本、豁免清单和执行日期优先级更高。</div>
+        <div class="policy-event-grid">
+          ${policyEvents.map((event) => {
+            const mappedStocks = policyMappedStocks(event.poolCategories || []);
+            return `<article class="policy-event-card ${escapeHtml(event.phase || "monitoring")}">
+              <div class="policy-event-head"><h4>${escapeHtml(event.name || "政策事件")}</h4><span>${escapeHtml(event.phaseLabel || "持续监测")}</span></div>
+              <p>${escapeHtml(event.pressureInteraction || "")}</p>
+              <div class="policy-event-news">
+                ${(event.items || []).slice(0, 3).map((item) => {
+                  const href = safeExternalHref(item.url || "");
+                  return href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer"><strong>${escapeHtml(item.title || "")}</strong><span>${escapeHtml(item.source || "")} · ${escapeHtml(formatPolicyTime(item.publishedAt))}</span></a>` : "";
+                }).join("") || "<span>暂无可用事件条目</span>"}
+              </div>
+              <div class="policy-ticker-list">
+                ${mappedStocks.slice(0, 6).map((stock) => `<button type="button" data-policy-ticker="${escapeHtml(stock.ticker)}">${escapeHtml(displayTicker(stock.ticker))}</button>`).join("") || "<span>暂无直接映射</span>"}
+              </div>
+            </article>`;
+          }).join("")}
+        </div>
       </div>
-      <div class="policy-event-grid">
-        ${policyEvents.map((event) => {
-          const mappedStocks = policyMappedStocks(event.poolCategories || []);
-          return `<article class="policy-event-card ${escapeHtml(event.phase || "monitoring")}">
-            <div class="policy-event-head"><h4>${escapeHtml(event.name || "政策事件")}</h4><span>${escapeHtml(event.phaseLabel || "持续监测")}</span></div>
-            <p>${escapeHtml(event.pressureInteraction || "")}</p>
-            <div class="policy-event-news">
-              ${(event.items || []).slice(0, 3).map((item) => {
-                const href = safeExternalHref(item.url || "");
-                return href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer"><strong>${escapeHtml(item.title || "")}</strong><span>${escapeHtml(item.source || "")} · ${escapeHtml(formatPolicyTime(item.publishedAt))}</span></a>` : "";
-              }).join("") || "<span>暂无可用事件条目</span>"}
-            </div>
-            <div class="policy-ticker-list">
-              ${mappedStocks.slice(0, 6).map((stock) => `<button type="button" data-policy-ticker="${escapeHtml(stock.ticker)}">${escapeHtml(displayTicker(stock.ticker))}</button>`).join("") || "<span>暂无直接映射</span>"}
-            </div>
-          </article>`;
-        }).join("")}
-      </div>
-    </section>` : ""}
+    </details>` : ""}
 
     <section class="policy-section policy-crowding-section">
       <div class="policy-section-head">
@@ -1663,38 +1678,53 @@ function renderPolicy() {
         <p>${escapeHtml(crowding.boundary || "机构拥挤度是反向风险提示，不是顶部确认。")}</p>
       </div>
       <div class="policy-crowding-toolbar" role="tablist" aria-label="机构反向信号视图">
-        <button type="button" data-crowding-mode="risk" class="${policyState.crowdingMode === "risk" ? "active" : ""}">当前风险排行</button>
-        <button type="button" data-crowding-mode="earnings" class="${policyState.crowdingMode === "earnings" ? "active" : ""}">财报后派发</button>
-        <button type="button" data-crowding-mode="lag" class="${policyState.crowdingMode === "lag" ? "active" : ""}">机构补降</button>
+        <button type="button" role="tab" aria-selected="${policyState.crowdingMode === "risk" ? "true" : "false"}" data-crowding-mode="risk" class="${policyState.crowdingMode === "risk" ? "active" : ""}">当前风险排行</button>
+        <button type="button" role="tab" aria-selected="${policyState.crowdingMode === "earnings" ? "true" : "false"}" data-crowding-mode="earnings" class="${policyState.crowdingMode === "earnings" ? "active" : ""}">财报后派发</button>
+        <button type="button" role="tab" aria-selected="${policyState.crowdingMode === "lag" ? "true" : "false"}" data-crowding-mode="lag" class="${policyState.crowdingMode === "lag" ? "active" : ""}">机构补降</button>
         <span>SOXX行业基准 · ${Number(crowding.history?.snapshotCount || 0)}个每日快照</span>
       </div>
-      ${crowdingRows.length ? `<div class="policy-crowding-grid">
-        ${crowdingDisplayRows.map((row) => {
-          const metrics = row.metrics || {};
-          const ticker = String(row.ticker || "");
-          const tickerLabel = stockByTicker.has(ticker)
-            ? `<button type="button" data-policy-ticker="${escapeHtml(ticker)}">${escapeHtml(ticker)}</button>`
-            : `<strong>${escapeHtml(ticker)}</strong>`;
-          const eventExcess = row.earningsWindow?.day20?.excess;
-          return `<article class="policy-crowding-card ${escapeHtml(row.zone || "balanced")} ${ticker === selectedCrowdingRow?.ticker ? "is-selected" : ""}">
-            <div class="policy-crowding-head"><div>${tickerLabel}<span>${escapeHtml(row.company || "")}</span></div><b>${Number(row.score || 0).toFixed(0)} · ${escapeHtml(row.label || "观察")}</b></div>
-            <div class="policy-crowding-metrics">
-              <span>买入占比 <strong>${Number(metrics.bullishShare || 0).toFixed(0)}%</strong></span>
-              <span>目标空间 <strong>${Number(metrics.targetUpside || 0) >= 0 ? "+" : ""}${Number(metrics.targetUpside || 0).toFixed(1)}%</strong></span>
-              <span>EPS 30日 <strong>${formatPolicyPercent(metrics.epsChange30d)}</strong></span>
-              <span>财报后超额 <strong>${formatPolicyPercent(eventExcess, 1, "待财报")}</strong></span>
-              <span>45日调价 <strong>${Number(metrics.targetRaises45d || 0)}升 / ${Number(metrics.targetCuts45d || 0)}降</strong></span>
-              <span>风险7日变化 <strong>${formatPolicyPercent(row.scoreChange7d, 1, "积累中").replace("%", "")}</strong></span>
-            </div>
-            <div class="policy-crowding-evidence">
-              ${(row.evidence || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("") || "<span>尚未形成多证据共振</span>"}
-            </div>
-            <button type="button" class="policy-crowding-detail-button" data-crowding-detail="${escapeHtml(ticker)}">查看预期、财报与补降时间线</button>
-            <footer><span>${escapeHtml(row.sourceName || "")}</span><time>${escapeHtml(formatPolicyTime(row.updatedAt))}</time></footer>
-          </article>`;
-        }).join("")}
+      ${crowdingRows.length ? `<div class="policy-crowding-workbench">
+        <div class="policy-crowding-rank" role="list" aria-label="机构反向信号排行榜">
+          <header><span>优先级</span><strong>${policyState.crowdingMode === "earnings" ? "财报后相对 SOXX" : policyState.crowdingMode === "lag" ? "股价先跌、机构后降" : "多证据风险分"}</strong></header>
+          ${crowdingDisplayRows.map((row, rankIndex) => {
+            const ticker = String(row.ticker || "");
+            const metrics = row.metrics || {};
+            const eventExcess = row.earningsWindow?.day20?.excess;
+            const modeMetric = policyState.crowdingMode === "earnings"
+              ? `20日超额 ${formatPolicyPercent(eventExcess, 1, "待财报")}`
+              : policyState.crowdingMode === "lag"
+                ? escapeHtml(row.downgradeLag?.label || "下调序列积累中")
+                : `${Number(metrics.bullishShare || 0).toFixed(0)}% 买入 · ${Number(metrics.targetRaises45d || 0)}升/${Number(metrics.targetCuts45d || 0)}降`;
+            return `<button type="button" role="listitem" class="policy-rank-row ${ticker === selectedCrowdingRow?.ticker ? "is-selected" : ""}" data-crowding-detail="${escapeHtml(ticker)}" aria-pressed="${ticker === selectedCrowdingRow?.ticker ? "true" : "false"}">
+              <b>${String(rankIndex + 1).padStart(2, "0")}</b>
+              <span><strong>${escapeHtml(ticker)}</strong><small>${escapeHtml(row.company || "")}</small></span>
+              <span><em>${Number(row.score || 0).toFixed(0)}</em><small>${escapeHtml(row.label || "观察")}</small></span>
+              <small>${modeMetric}</small>
+            </button>`;
+          }).join("")}
+        </div>
+        ${selectedCrowdingRow ? `<article class="policy-crowding-focus ${escapeHtml(selectedCrowdingRow.zone || "balanced")}">
+          <header>
+            <div><span>当前焦点</span><h4>${escapeHtml(selectedCrowdingRow.ticker)} <small>${escapeHtml(selectedCrowdingRow.company || "")}</small></h4></div>
+            <b>${Number(selectedCrowdingRow.score || 0).toFixed(0)} · ${escapeHtml(selectedCrowdingRow.label || "观察")}</b>
+          </header>
+          <p>${escapeHtml(selectedCrowdingRow.expectationDivergence?.label || "等待预期修正与价格信号形成交叉验证")}</p>
+          <div class="policy-focus-metrics">
+            <div><span>EPS 30日</span><strong class="${Number(selectedEps.change30d) < 0 ? "negative" : "positive"}">${formatPolicyPercent(selectedEps.change30d)}</strong></div>
+            <div><span>财报后20日超额</span><strong>${formatPolicyPercent(selectedEarningsWindow.day20?.excess, 1, "待财报")}</strong></div>
+            <div><span>机构补降</span><strong>${escapeHtml(selectedLag.label || "积累中")}</strong></div>
+            <div><span>45日目标价</span><strong>${Number(selectedCrowdingMetrics.targetRaises45d || 0)}升 / ${Number(selectedCrowdingMetrics.targetCuts45d || 0)}降</strong></div>
+          </div>
+          <div class="policy-crowding-evidence">
+            ${(selectedCrowdingRow.evidence || []).slice(0, 4).map((item) => `<span>${escapeHtml(item)}</span>`).join("") || "<span>尚未形成多证据共振</span>"}
+          </div>
+          <div class="policy-focus-actions">
+            <button type="button" class="primary" data-crowding-expand aria-expanded="${policyState.crowdingExpanded ? "true" : "false"}">${policyState.crowdingExpanded ? "收起完整分析" : "展开完整分析"}</button>
+            ${stockByTicker.has(selectedCrowdingRow.ticker) ? `<button type="button" data-policy-ticker="${escapeHtml(selectedCrowdingRow.ticker)}">查看产业链位置</button>` : ""}
+          </div>
+        </article>` : ""}
       </div>` : `<div class="policy-crowding-empty">分析师覆盖暂时不可用，本模块不使用虚构数据填补。</div>`}
-      ${selectedCrowdingRow ? `<section class="policy-crowding-detail">
+      ${selectedCrowdingRow && policyState.crowdingExpanded ? `<section class="policy-crowding-detail" id="policyCrowdingDetail">
         <header>
           <div><span>POINT-IN-TIME DIVERGENCE</span><h4>${escapeHtml(selectedCrowdingRow.ticker)} · ${escapeHtml(selectedCrowdingRow.company || "")}</h4></div>
           <div><strong>${escapeHtml(selectedCrowdingRow.expectationDivergence?.label || "等待预期修正确认")}</strong><span>${escapeHtml(selectedLag.label || "下调滞后积累中")}</span></div>
@@ -1718,26 +1748,34 @@ function renderPolicy() {
         ${buildCrowdingTimeline(selectedCrowdingRow)}
         <footer><span>每日快照保存风险分、目标价中位数、EPS与收入一致预期；目标价调整事件与价格曲线用于检验“股价先跌、机构后降”。</span><strong>${escapeHtml(selectedLag.label || "等待形成下调滞后序列")}</strong></footer>
       </section>` : ""}
-      <div class="policy-crowding-method">${escapeHtml(crowding.method || payload.method?.crowdingModel || "至少两项证据同时成立才提示高风险。")}</div>
+      <details class="policy-crowding-method">
+        <summary>模型判定边界</summary>
+        <p>${escapeHtml(crowding.method || payload.method?.crowdingModel || "至少两项证据同时成立才提示高风险。")}</p>
+      </details>
     </section>
 
-    ${scenarioMatrix.current ? `<section class="policy-section">
-      <div class="policy-section-head">
-        <div><span>DECISION MATRIX</span><h3>政策压力 × 机构拥挤</h3></div>
-        <p>把“政策会不会软化”和“资产是否已经被过度推销”分开判断。</p>
+    ${scenarioMatrix.current ? `<details class="policy-disclosure">
+      <summary>
+        <span><small>DECISION MATRIX</small><strong>政策压力 × 机构拥挤</strong></span>
+        <em>当前：${escapeHtml(scenarioMatrix.current.title || "等待判断")} · 查看四象限</em>
+      </summary>
+      <div class="policy-disclosure-body">
+        <div class="policy-disclosure-intro">把“政策会不会软化”和“资产是否已经被过度推销”分开判断。</div>
+        <div class="policy-current-scenario"><span>当前情景</span><strong>${escapeHtml(scenarioMatrix.current.title || "")}</strong><p>${escapeHtml(scenarioMatrix.current.action || "")}</p></div>
+        <div class="policy-scenario-grid">
+          ${scenarios.map((scenario) => `<article class="${scenario.id === scenarioMatrix.current.id ? "active" : ""}"><span>${escapeHtml(scenario.policy || "")} × ${escapeHtml(scenario.crowding || "")}</span><strong>${escapeHtml(scenario.title || "")}</strong><p>${escapeHtml(scenario.action || "")}</p></article>`).join("")}
+        </div>
       </div>
-      <div class="policy-current-scenario"><span>当前情景</span><strong>${escapeHtml(scenarioMatrix.current.title || "")}</strong><p>${escapeHtml(scenarioMatrix.current.action || "")}</p></div>
-      <div class="policy-scenario-grid">
-        ${scenarios.map((scenario) => `<article class="${scenario.id === scenarioMatrix.current.id ? "active" : ""}"><span>${escapeHtml(scenario.policy || "")} × ${escapeHtml(scenario.crowding || "")}</span><strong>${escapeHtml(scenario.title || "")}</strong><p>${escapeHtml(scenario.action || "")}</p></article>`).join("")}
-      </div>
-    </section>` : ""}
+    </details>` : ""}
 
-    <section class="policy-section">
-      <div class="policy-section-head">
-        <div><span>SIX PRESSURE DRIVERS</span><h3>六项压力驱动</h3></div>
-        <p>先看真实数值，再看压力分与权重贡献。不同发布频率分开标注，避免把民调和通胀误认为盘中数据。</p>
-      </div>
-      <div class="policy-driver-grid">
+    <details class="policy-disclosure">
+      <summary>
+        <span><small>SIX PRESSURE DRIVERS</small><strong>六项压力驱动</strong></span>
+        <em>${drivers.length} 项数据 · 查看数值、权重、贡献与新鲜度</em>
+      </summary>
+      <div class="policy-disclosure-body">
+        <div class="policy-disclosure-intro">先看真实数值，再看压力分与权重贡献。不同发布频率分开标注，避免把民调和通胀误认为盘中数据。</div>
+        <div class="policy-driver-grid">
         ${drivers.map((driver) => `
           <article class="policy-driver-card">
             <div class="policy-driver-head">
@@ -1760,25 +1798,31 @@ function renderPolicy() {
             </footer>
           </article>
         `).join("")}
+        </div>
       </div>
-    </section>
+    </details>
 
-    ${history.length ? `<section class="policy-section">
-      <div class="policy-section-head">
-        <div><span>PRESSURE TREND</span><h3>近期压力趋势</h3></div>
-        <p>历史序列用于观察压力方向，不代表政策一定转向。</p>
+    ${history.length ? `<details class="policy-disclosure">
+      <summary>
+        <span><small>PRESSURE TREND</small><strong>近期压力趋势</strong></span>
+        <em>${history.length} 个观测点 · 最近 ${Number(history.at(-1)?.value || value).toFixed(1)}</em>
+      </summary>
+      <div class="policy-disclosure-body">
+        <div class="policy-disclosure-intro">历史序列用于观察压力方向，不代表政策一定转向。</div>
+        <div class="policy-history-chart">
+          ${history.map((item) => `<div class="policy-history-column" title="${escapeHtml(item.date || "")} · ${Number(item.value || 0).toFixed(1)}"><strong>${Number(item.value || 0).toFixed(1)}</strong><i style="height:${(Number(item.value || 0) / historyMax) * 100}%"></i><span>${escapeHtml(item.label || item.date || "")}</span></div>`).join("")}
+        </div>
       </div>
-      <div class="policy-history-chart">
-        ${history.map((item) => `<div class="policy-history-column" title="${escapeHtml(item.date || "")} · ${Number(item.value || 0).toFixed(1)}"><strong>${Number(item.value || 0).toFixed(1)}</strong><i style="height:${(Number(item.value || 0) / historyMax) * 100}%"></i><span>${escapeHtml(item.label || item.date || "")}</span></div>`).join("")}
-      </div>
-    </section>` : ""}
+    </details>` : ""}
 
-    <section class="policy-section">
-      <div class="policy-section-head">
-        <div><span>STOCK POOL TRANSMISSION</span><h3>对当前股票池的映射</h3></div>
-        <p>只引用指数与行业传导；公司是否值得买，仍由基本面和行情位置决定。</p>
-      </div>
-      <div class="policy-mapping-grid">
+    <details class="policy-disclosure">
+      <summary>
+        <span><small>STOCK POOL TRANSMISSION</small><strong>对当前股票池的映射</strong></span>
+        <em>${mappings.length} 个方向 · 查看行业传导与关联标的</em>
+      </summary>
+      <div class="policy-disclosure-body">
+        <div class="policy-disclosure-intro">只引用指数与行业传导；公司是否值得买，仍由基本面和行情位置决定。</div>
+        <div class="policy-mapping-grid">
         ${mappings.map((mapping) => {
           const mappedStocks = policyMappedStocks(mapping.poolCategories || []);
           return `<article class="policy-mapping-card">
@@ -1792,8 +1836,9 @@ function renderPolicy() {
             </div>
           </article>`;
         }).join("")}
+        </div>
       </div>
-    </section>
+    </details>
 
     ${sourceHealth.length ? `<details class="policy-source-ledger">
       <summary><span>数据来源与新鲜度</span><strong>${sourceHealth.filter((item) => ["live", "current"].includes(item.freshness)).length} / ${sourceHealth.length} 项处于正常更新状态</strong></summary>
@@ -1811,10 +1856,10 @@ function renderPolicy() {
       </div>
     </details>` : ""}
 
-    <section class="policy-method-note">
-      <div><span>方法边界</span><strong>压力指数不是“退让预测器”</strong></div>
+    <details class="policy-method-note">
+      <summary><span>方法边界</span><strong>压力指数不是“退让预测器”</strong></summary>
       <p>${escapeHtml(payload.method?.weights || "民调25% / 标普20% / 美债15% / MOVE15% / VIX15% / CPI Nowcast10%")}。高分只表示政治与市场约束更强；本模块不构成投资建议。</p>
-    </section>
+    </details>
   `;
 
   panel.querySelector("#policyRefresh")?.addEventListener("click", () => loadPolicyData(true));
@@ -1823,15 +1868,25 @@ function renderPolicy() {
       policyState.crowdingMode = button.dataset.crowdingMode;
       const nextRows = sortCrowdingRows(crowdingRows, policyState.crowdingMode);
       policyState.crowdingTicker = nextRows[0]?.ticker || policyState.crowdingTicker;
+      policyState.crowdingExpanded = false;
       renderPolicy();
     });
   });
   panel.querySelectorAll("[data-crowding-detail]").forEach((button) => {
     button.addEventListener("click", () => {
       policyState.crowdingTicker = button.dataset.crowdingDetail;
+      policyState.crowdingExpanded = false;
       renderPolicy();
-      panel.querySelector(".policy-crowding-detail")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      panel.querySelector(".policy-crowding-focus")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
+  });
+  panel.querySelector("[data-crowding-expand]")?.addEventListener("click", () => {
+    policyState.crowdingExpanded = !policyState.crowdingExpanded;
+    renderPolicy();
+    const target = policyState.crowdingExpanded
+      ? panel.querySelector("#policyCrowdingDetail")
+      : panel.querySelector(".policy-crowding-focus");
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
   panel.querySelectorAll("[data-policy-ticker]").forEach((button) => {
     button.addEventListener("click", () => {
