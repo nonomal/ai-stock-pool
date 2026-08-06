@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 try:
     from curl_cffi import requests as curl_requests
@@ -411,6 +412,15 @@ class Signal:
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def report_today() -> str:
+    timezone_name = os.environ.get("DISCOVERY_TIMEZONE", "Asia/Shanghai")
+    try:
+        report_timezone = ZoneInfo(timezone_name)
+    except Exception:
+        report_timezone = ZoneInfo("Asia/Shanghai")
+    return now_utc().astimezone(report_timezone).date().isoformat()
 
 
 def clean_text(value: object, max_len: int | None = None) -> str:
@@ -1254,6 +1264,7 @@ def build_candidates(
     papers: list[dict[str, object]],
     quotes_payload: dict[str, object],
     context: dict[str, object],
+    run_date: str | None = None,
 ) -> list[dict[str, object]]:
     by_ticker_signals: dict[str, list[Signal]] = defaultdict(list)
     by_ticker_papers: dict[str, list[dict[str, object]]] = defaultdict(list)
@@ -1269,7 +1280,7 @@ def build_candidates(
             by_ticker_papers[ticker].append(paper)
 
     all_tickers = sorted(set(by_ticker_signals) | set(by_ticker_papers))
-    run_date = now_utc().date().isoformat()
+    run_date = run_date or report_today()
     rows: list[dict[str, object]] = []
     for ticker in all_tickers:
         support_signals = by_ticker_signals.get(ticker, [])
@@ -1363,6 +1374,7 @@ def write_report(
     quotes_payload: dict[str, object],
     warnings: list[str],
     context: dict[str, object],
+    report_date: str,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pool_rows: list[dict[str, str]] = context["pool_rows"]  # type: ignore[assignment]
@@ -1378,7 +1390,7 @@ def write_report(
     in_pool = [row for row in candidates if row.get("recommendation") == "already_in_pool"]
 
     content = [
-        f"# 主动探索报告 - {now_utc().date().isoformat()}",
+        f"# 主动探索报告 - {report_date}",
         "",
         "## 摘要",
         "",
@@ -1506,7 +1518,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--max-feed-items", type=int, default=20, help="Max entries to process per feed/query.")
     parser.add_argument("--max-extra-quotes", type=int, default=40, help="Max non-online-pool tickers to enrich with Yahoo quotes.")
     parser.add_argument("--arxiv-delay", type=float, default=3.0, help="Delay between arXiv API calls.")
-    parser.add_argument("--report-date", default=now_utc().date().isoformat(), help="Report date suffix.")
+    parser.add_argument("--report-date", default=report_today(), help="Report date suffix; defaults to Asia/Shanghai.")
     parser.add_argument("--fresh", action="store_true", help="Ignore existing discovery CSVs and rebuild from this run only.")
     parser.add_argument("--skip-network", action="store_true", help="Only rebuild candidates/report from existing CSVs.")
     return parser.parse_args(argv)
@@ -1525,10 +1537,10 @@ def main(argv: list[str] | None = None) -> int:
         quote_payload, quote_warnings = fetch_quotes()
         warnings.extend(quote_warnings)
         warnings.extend(enrich_quotes(quote_payload, collect_signal_tickers(existing_signals, papers), args.max_extra_quotes))
-        candidates = build_candidates(existing_signals, papers, quote_payload, context)
+        candidates = build_candidates(existing_signals, papers, quote_payload, context, args.report_date)
         write_csv_rows(CANDIDATES_FILE, CANDIDATE_FIELDS, candidates)
         report_path = REPORTS_DIR / f"discovery-{args.report_date}.md"
-        write_report(report_path, existing_signals, papers, candidates, quote_payload, warnings, context)
+        write_report(report_path, existing_signals, papers, candidates, quote_payload, warnings, context, args.report_date)
         print_summary(existing_signals, papers, candidates, report_path, warnings)
         return 0
 
@@ -1568,13 +1580,13 @@ def main(argv: list[str] | None = None) -> int:
     merged_papers.sort(key=lambda row: (str(row.get("published", "")), int(row.get("paper_signal_score", 0) or 0)), reverse=True)
 
     signal_objects = [Signal(**{field: row.get(field, "") for field in SIGNAL_FIELDS}) for row in merged_signals]
-    candidates = build_candidates(signal_objects, merged_papers, quote_payload, context)
+    candidates = build_candidates(signal_objects, merged_papers, quote_payload, context, args.report_date)
 
     write_csv_rows(SIGNALS_FILE, SIGNAL_FIELDS, merged_signals)
     write_csv_rows(PAPERS_FILE, PAPER_FIELDS, merged_papers)
     write_csv_rows(CANDIDATES_FILE, CANDIDATE_FIELDS, candidates)
     report_path = REPORTS_DIR / f"discovery-{args.report_date}.md"
-    write_report(report_path, signal_objects, merged_papers, candidates, quote_payload, warnings, context)
+    write_report(report_path, signal_objects, merged_papers, candidates, quote_payload, warnings, context, args.report_date)
     print_summary(signal_objects, merged_papers, candidates, report_path, warnings)
     return 0
 
