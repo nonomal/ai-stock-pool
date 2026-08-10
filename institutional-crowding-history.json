@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "updatedAt": "2026-08-10T14:22:34.010839+00:00",
+  "updatedAt": "2026-08-10T14:50:18.839255+00:00",
   "benchmark": "SOXX",
   "snapshots": [
     {
@@ -175,13 +175,13 @@
     },
     {
       "date": "2026-08-10",
-      "asOf": "2026-08-10T14:22:34.010247+00:00",
+      "asOf": "2026-08-10T14:50:18.836771+00:00",
       "rows": [
         {
           "ticker": "AMD",
-          "score": 64.2,
+          "score": 64.4,
           "zone": "crowded",
-          "currentPrice": 478.8,
+          "currentPrice": 477.81,
           "targetMean": 613.33,
           "targetMedian": 615.0,
           "bullishShare": 80.4,
@@ -192,9 +192,9 @@
         },
         {
           "ticker": "AVGO",
-          "score": 55.5,
+          "score": 55.9,
           "zone": "watch",
-          "currentPrice": 430.94,
+          "currentPrice": 429.37,
           "targetMean": 527.88,
           "targetMedian": 530.0,
           "bullishShare": 91.7,
@@ -205,9 +205,9 @@
         },
         {
           "ticker": "MRVL",
-          "score": 72.0,
+          "score": 72.2,
           "zone": "crowded",
-          "currentPrice": 218.51,
+          "currentPrice": 218.25,
           "targetMean": 256.91,
           "targetMedian": 242.5,
           "bullishShare": 88.4,
@@ -218,9 +218,9 @@
         },
         {
           "ticker": "MU",
-          "score": 77.2,
+          "score": 77.3,
           "zone": "distribution_risk",
-          "currentPrice": 876.38,
+          "currentPrice": 874.1,
           "targetMean": 1501.98,
           "targetMedian": 1550.0,
           "bullishShare": 89.1,
@@ -244,9 +244,9 @@
         },
         {
           "ticker": "SMCI",
-          "score": 33.7,
+          "score": 34.2,
           "zone": "balanced",
-          "currentPrice": 32.9,
+          "currentPrice": 32.75,
           "targetMean": 37.81,
           "targetMedian": 36.5,
           "bullishShare": 26.3,
