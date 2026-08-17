@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "updatedAt": "2026-08-14T11:52:29.500712+00:00",
+  "updatedAt": "2026-08-17T13:52:37.946665+00:00",
   "benchmark": "SOXX",
   "snapshots": [
     {
@@ -592,6 +592,91 @@
           "bullishShare": 26.3,
           "epsEstimate": 1.03533,
           "revenueEstimate": 14998863120.0,
+          "targetRaises45d": 0,
+          "targetCuts45d": 0
+        }
+      ],
+      "errors": {}
+    },
+    {
+      "date": "2026-08-17",
+      "asOf": "2026-08-17T13:52:37.944115+00:00",
+      "rows": [
+        {
+          "ticker": "AMD",
+          "score": 56.6,
+          "zone": "watch",
+          "currentPrice": 512.33,
+          "targetMean": 612.84,
+          "targetMedian": 610.0,
+          "bullishShare": 80.8,
+          "epsEstimate": 1.92529,
+          "revenueEstimate": 12992722440.0,
+          "targetRaises45d": 19,
+          "targetCuts45d": 0
+        },
+        {
+          "ticker": "AVGO",
+          "score": 66.6,
+          "zone": "crowded",
+          "currentPrice": 393.69,
+          "targetMean": 527.88,
+          "targetMedian": 530.0,
+          "bullishShare": 91.7,
+          "epsEstimate": 3.23823,
+          "revenueEstimate": 29435187950.0,
+          "targetRaises45d": 0,
+          "targetCuts45d": 0
+        },
+        {
+          "ticker": "MRVL",
+          "score": 64.1,
+          "zone": "crowded",
+          "currentPrice": 236.27,
+          "targetMean": 257.29,
+          "targetMedian": 242.5,
+          "bullishShare": 88.4,
+          "epsEstimate": 0.9279,
+          "revenueEstimate": 2704955330.0,
+          "targetRaises45d": 1,
+          "targetCuts45d": 0
+        },
+        {
+          "ticker": "MU",
+          "score": 67.9,
+          "zone": "crowded",
+          "currentPrice": 1013.61,
+          "targetMean": 1501.98,
+          "targetMedian": 1550.0,
+          "bullishShare": 89.1,
+          "epsEstimate": 31.30102,
+          "revenueEstimate": 50818298960.0,
+          "targetRaises45d": 1,
+          "targetCuts45d": 1
+        },
+        {
+          "ticker": "NVDA",
+          "score": 66.6,
+          "zone": "crowded",
+          "currentPrice": 226.02,
+          "targetMean": 302.83,
+          "targetMedian": 300.0,
+          "bullishShare": 95.1,
+          "epsEstimate": 2.0838,
+          "revenueEstimate": 91956584330.0,
+          "targetRaises45d": 1,
+          "targetCuts45d": 0
+        },
+        {
+          "ticker": "SMCI",
+          "score": 25.4,
+          "zone": "balanced",
+          "currentPrice": 38.4,
+          "targetMean": 42.38,
+          "targetMedian": 42.5,
+          "bullishShare": 26.3,
+          "epsEstimate": 1.03705,
+          "revenueEstimate": 14971092730.0,
           "targetRaises45d": 0,
           "targetCuts45d": 0
         }
